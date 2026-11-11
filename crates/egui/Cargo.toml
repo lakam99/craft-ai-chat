@@ -1,0 +1,21 @@
+[package]
+name = "craft-ai-chat-egui"
+description = "Reusable dock-body AI chat plugin with product-owned tools and active-view adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-ai-chat-core.workspace = true
+craft-ai-chat-native.workspace = true
+egui.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
+egui_kittest = "0.37"

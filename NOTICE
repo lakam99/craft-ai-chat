@@ -1,0 +1,14 @@
+Craft AI Chat
+
+This library extracts and generalizes AI chat functionality from the public
+FilmCraft and EffectCraft forks:
+
+https://github.com/lakam99/filmcraft
+Source revision: 8e1baf6c508ec7720765ce4cf455cc264afc59cf
+
+https://github.com/lakam99/effectcraft
+Source revision: 45049e4e4b25c5edb33b460417a5c5ef309cd217
+
+These projects and this library are licensed under MIT OR Apache-2.0.
+Original license notices are retained in LICENSE-MIT and LICENSE-APACHE.
+No artwork, fonts, trademarks or media assets are included in this library.
