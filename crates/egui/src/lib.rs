@@ -9,6 +9,7 @@
 )]
 
 mod conversation;
+mod guidance;
 mod ui;
 use conversation::Conversation;
 pub use conversation::{Activity, ActivityState, command_id, tool_label};
@@ -19,6 +20,7 @@ use craft_ai_chat_native::{
     Wake,
     credentials::{Action, Vault},
 };
+pub use guidance::HighlightTarget;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -42,6 +44,9 @@ pub trait Host {
     }
     fn tool_label(&self, call: &ToolCall) -> String {
         tool_label(call)
+    }
+    fn highlight_target(&self, _id: &str) -> Option<HighlightTarget> {
+        None
     }
     fn start_tool(&mut self, call: &ToolCall) -> Result<Self::Tool, String>;
     fn poll_tool(&mut self, tool: &mut Self::Tool) -> Result<Option<Value>, String>;
@@ -95,6 +100,7 @@ pub struct Panel<T> {
     remove_saved_key: bool,
     host_id: String,
     profile: Option<CredentialProfile>,
+    guidance: guidance::Guidance,
 }
 impl<T> Default for Panel<T> {
     fn default() -> Self {
@@ -115,6 +121,7 @@ impl<T> Default for Panel<T> {
             remove_saved_key: false,
             host_id: String::new(),
             profile: None,
+            guidance: guidance::Guidance::default(),
         }
     }
 }
@@ -158,6 +165,7 @@ impl<T> Panel<T> {
         &self.message
     }
     pub fn fail(&mut self, error: &str) {
+        self.guidance.clear();
         self.pending = None;
         self.history.clear();
         self.chat.interrupt(ActivityState::Failed, error);
@@ -195,13 +203,14 @@ impl<T> Panel<T> {
             .initialize(path, service, self.preferences.remember_key, wake(ctx));
     }
     pub fn stop(&mut self) {
+        self.guidance.clear();
         if let Some(pending) = &self.pending {
             pending.cancel.store(true, Ordering::Release);
             self.message="Stopping. No further tools will run; an in-flight API request may take up to 120 seconds to finish.".into();
         }
     }
     pub fn status<H: Host<Tool = T>>(&self, host: &H) -> Value {
-        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript})
+        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status(host)})
     }
     pub fn command<H: Host<Tool = T>>(
         &mut self,
@@ -217,6 +226,7 @@ impl<T> Panel<T> {
                 | "ai.stop"
                 | "ai.clear"
                 | "ai.status"
+                | "ai.clearHighlights"
                 | "ai.saveKey"
                 | "ai.loadKey"
                 | "ai.forgetKey"
@@ -231,11 +241,16 @@ impl<T> Panel<T> {
             }
             "ai.settings" => host.open_preferences().map(|()| Value::Null),
             "ai.send" => self.send(host, ctx),
+            "ai.clearHighlights" => {
+                self.guidance.dismiss();
+                Ok(Value::Null)
+            }
             "ai.stop" => {
                 self.stop();
                 Ok(Value::Null)
             }
             "ai.clear" if !self.busy() => {
+                self.guidance.clear();
                 self.history.clear();
                 self.chat.clear();
                 self.markdown_cache = egui_commonmark::CommonMarkCache::default();
@@ -332,6 +347,7 @@ impl<T> Panel<T> {
             }
         }
         let info = host.info().clone();
+        self.guidance.begin_turn();
         let attach = self.preferences.attach_frames;
         let mut history = self.history.clone();
         let (sender, events) = mpsc::sync_channel(1);
@@ -381,6 +397,7 @@ impl<T> Panel<T> {
     }
     pub fn poll<H: Host<Tool = T>>(&mut self, host: &mut H, ctx: &egui::Context) {
         self.sync(host, ctx);
+        self.guidance.sync(host);
         self.vault.poll(&mut self.key);
         if self.remove_saved_key && !self.vault.busy() {
             self.remove_saved_key = false;
@@ -460,6 +477,9 @@ impl<T> Panel<T> {
             } else {
                 let mut work = || -> Result<Option<Value>, String> {
                     host.info().validate_call(&job.call)?;
+                    if job.call.name == "highlight_ui" {
+                        return self.guidance.apply(host, &job.call.arguments).map(Some);
+                    }
                     if job.tool.is_none() {
                         job.tool = Some(host.start_tool(&job.call)?);
                     }

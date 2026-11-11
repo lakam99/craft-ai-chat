@@ -85,6 +85,23 @@ new line. Stop replaces Send while a request runs. New chat clears the session.
 Connection controls are collapsed behind the key-status button (`ai.connection`);
 model, frame and key-storage preferences remain in the editor's preferences.
 
+## Visual guidance
+
+Adapters opt in with `craft_ai_chat_core::editor::with_guidance(info)` and implement
+`Host::highlight_target` using the editor's live widget registry. Call
+`Panel::paint_guidance` after layout in each editor viewport. Return clipped widget
+rectangles, and return `None` for controls that are no longer visible.
+
+The assistant can then call `highlight_ui` with up to eight discovered widget IDs
+and short action labels. Numbered outlines match the instructions in the chat;
+they do not click controls, edit the document or consume pointer input. Guidance
+follows layout changes, omits hidden controls, and clears on document replacement,
+Stop or a new question. Clear highlights and Escape dismiss the current guide;
+the same AI turn cannot restore a guide the user dismissed. Empty targets clears
+guidance programmatically. Invalid or reserved AI targets are rejected before
+changing an existing guide. “How do I” instructions ask the assistant to guide
+instead of performing the edit.
+
 ## Privacy and lifecycle
 
 The key stays in session memory or the OS credential store, never ordinary

@@ -3,6 +3,27 @@ use crate::{HostInfo, ToolCall, function};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// Opt in only when the adapter resolves discovered widget IDs to live screen geometry.
+pub fn with_guidance(mut info: HostInfo) -> HostInfo {
+    info.tools.push(function(
+        "highlight_ui",
+        "Outline discovered editor controls for the user without clicking them or editing the document. Inspect ui.elements first. Empty targets clears guidance.",
+        json!({"type":"object","properties":{"targets":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":256},"label":{"type":"string","maxLength":160}},"required":["id","label"],"additionalProperties":false}}},"required":["targets"],"additionalProperties":false}),
+    ));
+    info.instructions.push_str(" When the user asks how to do something, guide them instead of performing the edit. Inspect ui.elements, then use highlight_ui with actual visible widget IDs and short action labels. Match numbered instructions to the numbered outlines. Open a relevant panel or menu using advertised UI tools when necessary, inspect again, and highlight its controls. Do not execute the requested edit unless asked to do it. Never invent a target or claim a control was highlighted when the tool returned an error. Highlighting does not click controls, change values or change the document. Use an empty targets array to clear highlights.");
+    info
+}
+
+pub fn is_chat_target(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id == "ai"
+        || id.starts_with("ai.")
+        || id.starts_with("settings.ai")
+        || id.starts_with("preferences.ai")
+        || id == "app.settings.ai"
+        || id == "panel.aichat"
+}
+
 #[derive(Clone)]
 pub struct EditorTools {
     pub name: &'static str,

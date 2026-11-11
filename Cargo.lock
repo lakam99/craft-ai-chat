@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ai-chat-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ai-chat-egui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "craft-ai-chat-core",
  "craft-ai-chat-native",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ai-chat-native"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "craft-ai-chat-core",
  "keyring",

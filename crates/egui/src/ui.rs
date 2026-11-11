@@ -223,6 +223,7 @@ impl<T> Panel<T> {
                 });
             }
             ui.add_space(8.0);
+            self.guidance_ui(host, ui);
             ui.separator();
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {

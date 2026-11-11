@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -21,9 +21,9 @@ todo = "deny"
 unreachable = "deny"
 
 [workspace.dependencies]
-craft-ai-chat-core = { path = "crates/core", version = "0.2.0" }
-craft-ai-chat-native = { path = "crates/native", version = "0.2.0" }
-craft-ai-chat-egui = { path = "crates/egui", version = "0.2.0" }
+craft-ai-chat-core = { path = "crates/core", version = "0.3.0" }
+craft-ai-chat-native = { path = "crates/native", version = "0.3.0" }
+craft-ai-chat-egui = { path = "crates/egui", version = "0.3.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 egui = { version = "0.37", default-features = false }

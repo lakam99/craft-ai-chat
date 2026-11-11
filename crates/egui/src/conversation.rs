@@ -151,6 +151,9 @@ pub fn command_id(call: &ToolCall) -> Option<String> {
         .map(str::to_owned)
 }
 pub fn tool_label(call: &ToolCall) -> String {
+    if call.name == "highlight_ui" {
+        return "Highlight editor controls".into();
+    }
     if call.name == "video_frame" {
         return call
             .arguments
