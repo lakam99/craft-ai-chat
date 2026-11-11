@@ -8,7 +8,10 @@
     clippy::unreachable
 )]
 
+mod conversation;
 mod ui;
+use conversation::Conversation;
+pub use conversation::{Activity, ActivityState, command_id, tool_label};
 pub use craft_ai_chat_core as core;
 use craft_ai_chat_core::protocol;
 pub use craft_ai_chat_core::{HostInfo, Preferences, ToolCall};
@@ -37,6 +40,9 @@ pub trait Host {
     fn credential_profile(&self) -> Option<CredentialProfile> {
         None
     }
+    fn tool_label(&self, call: &ToolCall) -> String {
+        tool_label(call)
+    }
     fn start_tool(&mut self, call: &ToolCall) -> Result<Self::Tool, String>;
     fn poll_tool(&mut self, tool: &mut Self::Tool) -> Result<Option<Value>, String>;
     fn set_preference(&mut self, key: &str, value: Value) -> Result<(), String>;
@@ -49,6 +55,7 @@ pub trait Host {
 }
 
 struct ToolJob<T> {
+    activity_id: u64,
     call: ToolCall,
     reply: mpsc::Sender<Value>,
     deadline: Instant,
@@ -75,7 +82,10 @@ pub struct Panel<T> {
     key: String,
     prompt: String,
     message: String,
-    transcript: Vec<(String, String)>,
+    chat: Conversation,
+    markdown_cache: egui_commonmark::CommonMarkCache,
+    markdown_oldest: Option<u64>,
+    connection_open: bool,
     history: Vec<Value>,
     history_model: String,
     history_instance: Option<Arc<()>>,
@@ -92,7 +102,10 @@ impl<T> Default for Panel<T> {
             key: String::new(),
             prompt: String::new(),
             message: String::new(),
-            transcript: Vec::new(),
+            chat: Conversation::default(),
+            markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            markdown_oldest: None,
+            connection_open: false,
             history: Vec::new(),
             history_model: String::new(),
             history_instance: None,
@@ -139,7 +152,7 @@ impl<T> Panel<T> {
         self.history.len()
     }
     pub fn transcript(&self) -> &[(String, String)] {
-        &self.transcript
+        &self.chat.transcript
     }
     pub fn message(&self) -> &str {
         &self.message
@@ -147,15 +160,12 @@ impl<T> Panel<T> {
     pub fn fail(&mut self, error: &str) {
         self.pending = None;
         self.history.clear();
+        self.chat.interrupt(ActivityState::Failed, error);
         self.message = error.into();
         self.record("Notice", error.into());
     }
     fn record(&mut self, role: &str, text: String) {
-        if self.transcript.len() >= 128 {
-            self.transcript.remove(0);
-        }
-        self.transcript
-            .push((role.into(), text.chars().take(32_768).collect()));
+        self.chat.message(role, text);
     }
     fn sync<H: Host<Tool = T>>(&mut self, host: &H, ctx: &egui::Context) {
         let profile = host.credential_profile();
@@ -163,7 +173,8 @@ impl<T> Panel<T> {
             self.stop();
             self.key.clear();
             self.history.clear();
-            self.transcript.clear();
+            self.chat.clear();
+            self.markdown_cache = egui_commonmark::CommonMarkCache::default();
             self.vault = Vault::default();
             clear_key_undo(ctx);
             self.remove_saved_key = false;
@@ -190,7 +201,7 @@ impl<T> Panel<T> {
         }
     }
     pub fn status<H: Host<Tool = T>>(&self, host: &H) -> Value {
-        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.transcript})
+        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript})
     }
     pub fn command<H: Host<Tool = T>>(
         &mut self,
@@ -201,6 +212,7 @@ impl<T> Panel<T> {
         if !matches!(
             id,
             "ai.settings"
+                | "ai.connection"
                 | "ai.send"
                 | "ai.stop"
                 | "ai.clear"
@@ -213,6 +225,10 @@ impl<T> Panel<T> {
         }
         self.sync(host, ctx);
         Some(match id {
+            "ai.connection" => {
+                self.connection_open = !self.connection_open;
+                Ok(Value::Null)
+            }
             "ai.settings" => host.open_preferences().map(|()| Value::Null),
             "ai.send" => self.send(host, ctx),
             "ai.stop" => {
@@ -221,7 +237,8 @@ impl<T> Panel<T> {
             }
             "ai.clear" if !self.busy() => {
                 self.history.clear();
-                self.transcript.clear();
+                self.chat.clear();
+                self.markdown_cache = egui_commonmark::CommonMarkCache::default();
                 self.message.clear();
                 Ok(Value::Null)
             }
@@ -307,7 +324,7 @@ impl<T> Panel<T> {
                 .is_some_and(|old| !Arc::ptr_eq(old, &instance))
         {
             self.history.clear();
-            if !self.transcript.is_empty() {
+            if !self.chat.transcript.is_empty() {
                 self.record(
                     "Notice",
                     "New model or document: starting a new conversation context.".into(),
@@ -397,6 +414,14 @@ impl<T> Panel<T> {
                     }
                     Err(error) => {
                         self.history.clear();
+                        self.chat.interrupt(
+                            if pending.cancel.load(Ordering::Acquire) {
+                                ActivityState::Stopped
+                            } else {
+                                ActivityState::Failed
+                            },
+                            &error,
+                        );
                         self.record("Notice", error.clone());
                         self.message = error;
                     }
@@ -404,7 +429,9 @@ impl<T> Panel<T> {
                 return;
             }
             Ok(Event::Tool(call, reply)) => {
+                let activity_id = self.chat.begin(host.tool_label(&call));
                 pending.tool = Some(ToolJob {
+                    activity_id,
                     call,
                     reply,
                     deadline: Instant::now() + Duration::from_secs(30),
@@ -418,14 +445,18 @@ impl<T> Panel<T> {
             Err(mpsc::TryRecvError::Empty) => {}
         }
         if let Some(mut job) = pending.tool.take() {
+            let timed_out =
+                Instant::now() > job.deadline && !pending.cancel.load(Ordering::Acquire);
             let result = if pending.cancel.load(Ordering::Acquire) {
                 Some(Value::String(
                     json!({"ok":false,"error":"AI stopped or a different document was opened"})
                         .to_string(),
                 ))
-            } else if Instant::now() > job.deadline {
+            } else if timed_out {
                 pending.cancel.store(true, Ordering::Release);
-                Some(Value::String("Host tool timed out".into()))
+                Some(Value::String(
+                    json!({"ok":false,"error":"Host tool timed out"}).to_string(),
+                ))
             } else {
                 let mut work = || -> Result<Option<Value>, String> {
                     host.info().validate_call(&job.call)?;
@@ -441,24 +472,14 @@ impl<T> Panel<T> {
                 }
             };
             if let Some(result) = result {
-                let detail = if result.is_array() {
-                    "view attached".into()
+                let (state, detail) = if timed_out {
+                    (ActivityState::Failed, "Host tool timed out".into())
+                } else if pending.cancel.load(Ordering::Acquire) {
+                    (ActivityState::Stopped, "No further actions will run".into())
                 } else {
-                    result
-                        .as_str()
-                        .unwrap_or("completed")
-                        .chars()
-                        .take(1024)
-                        .collect::<String>()
+                    conversation::outcome(&result)
                 };
-                let arguments = job
-                    .call
-                    .arguments
-                    .to_string()
-                    .chars()
-                    .take(1024)
-                    .collect::<String>();
-                self.record("Tool", format!("{} {arguments}\n{detail}", job.call.name));
+                self.chat.finish(job.activity_id, state, detail);
                 let _ = job.reply.send(result);
             } else {
                 pending.tool = Some(job);
@@ -468,3 +489,6 @@ impl<T> Panel<T> {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

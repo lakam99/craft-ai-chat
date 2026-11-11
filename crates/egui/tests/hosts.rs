@@ -13,6 +13,8 @@ struct Document {
     undo: Vec<String>,
     calls: usize,
     panic_on_edit: bool,
+    hold_tool: bool,
+    extra_detail: bool,
     thread: std::thread::ThreadId,
     widgets: HashMap<String, egui::Id>,
     rects: HashMap<String, egui::Rect>,
@@ -46,6 +48,8 @@ impl Document {
             undo: vec![],
             calls: 0,
             panic_on_edit: false,
+            hold_tool: false,
+            extra_detail: false,
             thread: std::thread::current().id(),
             widgets: HashMap::new(),
             rects: HashMap::new(),
@@ -84,13 +88,21 @@ impl Host for Document {
                     .ok_or("Invalid title")?;
                 self.undo.push(self.title.clone());
                 self.title = title.into();
-                Ok(Some(json!({"ok":true})))
+                Ok(Some(if self.extra_detail {
+                    json!({"ok":true,"debugPayload":"RAW_INTERNAL_RESULT"})
+                } else {
+                    json!({"ok":true})
+                }))
             }
             _ => Err("Unsupported document tool".into()),
         }
     }
     fn poll_tool(&mut self, tool: &mut Self::Tool) -> Result<Option<Value>, String> {
-        Ok(tool.take())
+        if self.hold_tool {
+            Ok(None)
+        } else {
+            Ok(tool.take())
+        }
     }
     fn set_preference(&mut self, key: &str, value: Value) -> Result<(), String> {
         match key {
@@ -231,7 +243,6 @@ fn common_panel_preserves_password_forget_and_narrow_layout() {
     for id in [
         "ai.prompt",
         "ai.send",
-        "ai.stop",
         "ai.clear",
         "ai.attach",
         "ai.settings",
@@ -242,6 +253,8 @@ fn common_panel_preserves_password_forget_and_narrow_layout() {
             "{id}: {rect:?}"
         );
     }
+    h.get_by_label("Set up API key").click();
+    h.run_steps(3);
     let field = *h.state().1.widgets.get("ai.key").unwrap();
     h.ctx.memory_mut(|m| m.request_focus(field));
     h.input_mut()
@@ -253,6 +266,12 @@ fn common_panel_preserves_password_forget_and_narrow_layout() {
     h.run_steps(3);
     assert!(!h.state().0.has_key());
     h.ctx.memory_mut(|m| m.request_focus(field));
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers {
+            command: true,
+            ..Default::default()
+        }));
     h.input_mut().events.push(egui::Event::Key {
         key: egui::Key::Z,
         physical_key: None,
@@ -289,4 +308,56 @@ fn a_panicking_host_cancels_the_turn_without_running_another_tool() {
     assert_eq!(host.calls, 1);
     assert!(panel.message().contains("tool failed"));
     assert_eq!(panel.context_items(), 0);
+}
+
+#[test]
+fn tool_cards_show_progress_without_leaking_raw_payloads_to_chat() {
+    let mut host = Document::new();
+    host.prefs.attach_frames = false;
+    host.hold_tool = true;
+    host.extra_detail = true;
+    let mut panel = Panel::default();
+    *panel.prompt_mut() = "Rename".into();
+    let mut calls = 0;
+    panel
+        .send_with(&mut host, &egui::Context::default(), move |body| {
+            calls += 1;
+            if calls == 1 {
+                return Ok(edit());
+            }
+            // Presentation must not change the result returned to the model.
+            assert!(body.to_string().contains("RAW_INTERNAL_RESULT"));
+            Ok(message())
+        })
+        .unwrap();
+    let ctx = egui::Context::default();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while host.calls == 0 && Instant::now() < deadline {
+        panel.poll(&mut host, &ctx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(host.calls, 1);
+    assert!(
+        panel
+            .transcript()
+            .iter()
+            .any(|(_, text)| text == "Rename document — Working")
+    );
+    host.hold_tool = false;
+    finish(&mut panel, &mut host);
+    assert!(
+        panel
+            .transcript()
+            .iter()
+            .any(|(_, text)| text == "Rename document — Done")
+    );
+    let visible = panel.status(&host).to_string();
+    for raw in [
+        "RAW_INTERNAL_RESULT",
+        "debugPayload",
+        "call_id",
+        "arguments",
+    ] {
+        assert!(!visible.contains(raw), "{visible}");
+    }
 }

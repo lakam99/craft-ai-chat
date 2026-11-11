@@ -19,9 +19,10 @@ The application must be rebuilt with an adapter.
 Desktop UI integration requires Rust 1.95 and egui 0.37. The workspace pins the
 same permissively licensed egui revision used by the two editors. Cargo patches
 in a dependency are not inherited: the consuming workspace must use a compatible
-egui source/revision too. See the root `Cargo.toml` for the five patch entries.
-No new production dependency is required beyond those previously used by the
-editors' chat implementations.
+egui source/revision too. See the root `Cargo.toml` for all patch entries, including `egui_extras` used by the Markdown renderer.
+Markdown uses `egui_commonmark` (MIT OR Apache-2.0) and `pulldown-cmark` (MIT);
+license notices are included in `third_party/`. Image, file and network loading
+features are disabled.
 
 ## Integrating a product
 
@@ -65,6 +66,25 @@ arrays. Validate all arguments in the adapter; a function schema is not an
 authorization boundary. Advertise only operations allowed for that user and
 exclude AI controls, credentials and recursive AI invocation.
 
+## Conversation panel
+
+Replies and user messages support Markdown headings, emphasis, lists, blockquotes,
+links, fenced code blocks and tables. Assistant messages have a Copy button.
+Images and HTML are omitted, and links are limited to HTTP(S) or anchors. Oversized
+or deeply nested Markdown falls back to selectable plain text.
+
+Tool calls appear as compact activity cards with readable names and Working,
+Done, Failed or Stopped states. Raw arguments and results stay in protocol history
+for the model; they never become chat bubbles or readable transcript entries.
+Override `Host::tool_label` to resolve `command_id(call)` through the product's
+command registry. The existing `transcript()` and `ai.status` formats remain
+compatible, with readable tool summaries.
+
+The composer stays at the bottom of the dock. Enter sends; Shift+Enter inserts a
+new line. Stop replaces Send while a request runs. New chat clears the session.
+Connection controls are collapsed behind the key-status button (`ai.connection`);
+model, frame and key-storage preferences remain in the editor's preferences.
+
 ## Privacy and lifecycle
 
 The key stays in session memory or the OS credential store, never ordinary
@@ -96,7 +116,7 @@ cargo check -p craft-ai-chat-core --target wasm32-unknown-unknown
 Tests use injected transports and a mock credential store. They make no paid API
 calls. They cover protocol continuity, images, hostile parameters, tool limits,
 custom document tools, UI-thread execution, document/host switching and password
-forget behavior. Editor repositories additionally test actual engine/UI dispatch,
+forget behavior, Markdown safety, action-card progress and narrow layouts. Editor repositories additionally test actual engine/UI dispatch,
 rendered active views and dock integration.
 
 ## License

@@ -12,3 +12,11 @@ Source revision: 45049e4e4b25c5edb33b460417a5c5ef309cd217
 These projects and this library are licensed under MIT OR Apache-2.0.
 Original license notices are retained in LICENSE-MIT and LICENSE-APACHE.
 No artwork, fonts, trademarks or media assets are included in this library.
+
+Markdown rendering dependencies (license texts in third_party/):
+- egui_commonmark 0.26.0 and egui_commonmark_backend 0.26.0
+  https://github.com/lampsitter/egui_commonmark
+  MIT OR Apache-2.0; distributed under MIT.
+- pulldown-cmark 0.13.6
+  https://github.com/pulldown-cmark/pulldown-cmark
+  MIT.

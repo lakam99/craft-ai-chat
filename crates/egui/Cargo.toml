@@ -11,11 +11,16 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 craft-ai-chat-core.workspace = true
 craft-ai-chat-native.workspace = true
 egui.workspace = true
 serde_json.workspace = true
+# MIT OR Apache-2.0; image/file/network loading is deliberately disabled.
+egui_commonmark = { version = "=0.26.0", default-features = false, features = ["pulldown_cmark"] }
+# MIT; validate nesting and links before passing untrusted replies to the renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
-egui_kittest = "0.37"
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
