@@ -20,3 +20,6 @@ Markdown rendering dependencies (license texts in third_party/):
 - pulldown-cmark 0.13.6
   https://github.com/pulldown-cmark/pulldown-cmark
   MIT.
+- unicase 2.10.0
+  https://github.com/seanmonstar/unicase
+  MIT OR Apache-2.0; distributed under MIT.
