@@ -210,7 +210,7 @@ impl<T> Panel<T> {
         }
     }
     pub fn status<H: Host<Tool = T>>(&self, host: &H) -> Value {
-        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status(host)})
+        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status()})
     }
     pub fn command<H: Host<Tool = T>>(
         &mut self,

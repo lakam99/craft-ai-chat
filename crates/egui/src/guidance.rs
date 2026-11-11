@@ -30,12 +30,14 @@ struct Target {
 #[derive(Default)]
 pub(super) struct Guidance {
     targets: Vec<Target>,
+    visible: HashSet<String>,
     instance: Option<Arc<()>>,
     dismissed: bool,
 }
 impl Guidance {
     pub(super) fn clear(&mut self) {
         self.targets.clear();
+        self.visible.clear();
         self.instance = None;
     }
     pub(super) fn dismiss(&mut self) {
@@ -84,6 +86,11 @@ impl Guidance {
         }
         // All targets are validated before replacing an existing guide.
         self.targets = args.targets;
+        self.visible = self
+            .targets
+            .iter()
+            .map(|target| target.id.clone())
+            .collect();
         self.instance = Some(host.instance());
         Ok(
             json!({"ok":true,"highlighted":self.targets.iter().enumerate().map(|(n,t)|json!({"number":n+1,"id":t.id,"label":t.label})).collect::<Vec<_>>()}),
@@ -98,8 +105,8 @@ impl Guidance {
             self.clear();
         }
     }
-    pub(super) fn status<H: Host>(&self, host: &H) -> Value {
-        json!(self.targets.iter().enumerate().map(|(n,t)|json!({"number":n+1,"id":t.id,"label":t.label,"visible":host.highlight_target(&t.id).is_some()})).collect::<Vec<_>>())
+    pub(super) fn status(&self) -> Value {
+        json!(self.targets.iter().enumerate().map(|(n,t)|json!({"number":n+1,"id":t.id,"label":t.label,"visible":self.visible.contains(&t.id)})).collect::<Vec<_>>())
     }
 }
 fn core_size(args: &Value) -> Result<(), String> {
@@ -127,6 +134,21 @@ impl<T> Panel<T> {
         }) {
             self.guidance.dismiss();
         }
+        if ctx.will_discard() {
+            return;
+        }
+        // Chat bodies can precede their target panels. Only the completed, accepted layout
+        // can determine visibility; partial/discarded passes must not report visible controls hidden.
+        self.guidance.visible = self
+            .guidance
+            .targets
+            .iter()
+            .filter_map(|target| {
+                host.highlight_target(&target.id)
+                    .filter(|w| w.rect.is_finite() && w.rect.is_positive())
+                    .map(|_| target.id.clone())
+            })
+            .collect();
         let painter = ctx.layer_painter(LayerId::new(
             Order::Tooltip,
             Id::unique("craft.ai.guidance"),
@@ -192,15 +214,23 @@ impl<T> Panel<T> {
                     self.guidance.dismiss();
                 }
             });
-            for (n, target) in self.guidance.targets.iter().enumerate() {
-                let visible = host.highlight_target(&target.id).is_some();
-                ui.label(format!(
-                    "{}. {}{}",
-                    n + 1,
-                    target.label,
-                    if visible { "" } else { " (control hidden)" }
-                ));
-            }
+            // A long guide must not push the composer or the dismissal button out of a small dock.
+            egui::ScrollArea::vertical()
+                .id_salt("ai.highlight.targets")
+                .max_height(110.0)
+                .min_scrolled_height(0.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (n, target) in self.guidance.targets.iter().enumerate() {
+                        let visible = self.guidance.visible.contains(&target.id);
+                        ui.label(format!(
+                            "{}. {}{}",
+                            n + 1,
+                            target.label,
+                            if visible { "" } else { " (control hidden)" }
+                        ));
+                    }
+                });
             ui.small("Press Esc to dismiss. Highlighting does not perform the action.");
         });
     }

@@ -64,8 +64,12 @@ impl Host for Editor {
     fn open_preferences(&mut self) -> Result<(), String> {
         Ok(())
     }
-    fn widget(&mut self, _: &str, _: &egui::Response, _: &str) {}
-    fn area(&mut self, _: &str, _: Rect, _: &str) {}
+    fn widget(&mut self, id: &str, response: &egui::Response, _: &str) {
+        self.widgets.insert(id.into(), response.interact_rect);
+    }
+    fn area(&mut self, id: &str, rect: Rect, _: &str) {
+        self.widgets.insert(id.into(), rect);
+    }
 }
 fn request(id: &str) -> Value {
     json!({"targets":[{"id":id,"label":"Press Play"}]})
@@ -259,4 +263,62 @@ fn highlighted_buttons_remain_clickable_and_dismissal_is_respected() {
         harness.state().0.guidance.targets.is_empty(),
         "guidance also dismisses after the editor consumes Escape"
     );
+}
+
+#[test]
+fn a_long_guide_keeps_the_composer_and_dismissal_inside_a_small_dock() {
+    use egui_kittest::Harness;
+    let mut host = Editor::default();
+    let targets: Vec<Value> = (0..8).map(|n| {
+        let id = format!("editor.control.{n}");
+        host.widgets.insert(id.clone(), Rect::from_min_size(pos2(30.0, 30.0), vec2(20.0, 20.0)));
+        json!({"id":id,"label":"A long instruction that wraps across several lines in a narrow editor dock"})
+    }).collect();
+    let mut panel = Panel::<()>::default();
+    panel
+        .guidance
+        .apply(&host, &json!({"targets":targets}))
+        .unwrap();
+    let mut h = Harness::builder()
+        .with_size(vec2(220.0, 490.0))
+        .build_ui_state(
+            |ui, (panel, host): &mut (Panel<()>, Editor)| panel.show(host, ui, ui.max_rect()),
+            (panel, host),
+        );
+    h.run_steps(4);
+    for id in ["ai.prompt", "ai.send", "ai.clearHighlights"] {
+        let rect = h.state().1.widgets.get(id).unwrap();
+        assert!(
+            rect.min.x >= 0.0 && rect.min.y >= 0.0 && rect.max.x <= 220.0 && rect.max.y <= 490.0,
+            "clipped {id}: {rect:?}"
+        );
+    }
+}
+
+#[test]
+fn guide_card_waits_for_completed_layout_before_marking_a_control_hidden() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let host = Editor::default();
+    let mut panel = Panel::<()>::default();
+    panel
+        .guidance
+        .apply(&host, &request("toolbar.play"))
+        .unwrap();
+    let mut h = Harness::builder()
+        .with_size(vec2(400.0, 300.0))
+        .build_ui_state(
+            |ui, (panel, host, finished): &mut (Panel<()>, Editor, bool)| {
+                host.widgets.clear(); // The target panel has not drawn yet.
+                panel.guidance_ui(host, ui);
+                if *finished {
+                    panel.paint_guidance(host, ui.ctx());
+                }
+            },
+            (panel, host, false),
+        );
+    h.run_steps(3);
+    assert!(h.query_by_label("1. Press Play (control hidden)").is_none());
+    h.state_mut().2 = true; // The completed pass really no longer contains this control.
+    h.run_steps(3);
+    h.get_by_label("1. Press Play (control hidden)");
 }
