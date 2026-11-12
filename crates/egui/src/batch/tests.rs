@@ -1,4 +1,5 @@
 use super::*;
+mod history;
 use crate::*;
 use std::sync::{
     Arc,
@@ -14,6 +15,7 @@ struct Editor {
     document: String,
     fail_at: Option<usize>,
     hold: bool,
+    remember_history: bool,
 }
 impl Default for Editor {
     fn default() -> Self {
@@ -31,6 +33,7 @@ impl Default for Editor {
             document: "project-a".into(),
             fail_at: None,
             hold: false,
+            remember_history: true,
         }
     }
 }
@@ -46,6 +49,7 @@ impl Host for Editor {
         Preferences {
             attach_frames: false,
             remember_key: false,
+            remember_history: self.remember_history,
             ..Default::default()
         }
     }
@@ -86,6 +90,49 @@ impl Host for Editor {
     }
     fn widget(&mut self, _: &str, _: &egui::Response, _: &str) {}
     fn area(&mut self, _: &str, _: egui::Rect, _: &str) {}
+}
+
+#[test]
+fn reenabling_history_saves_the_current_chat_without_another_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Editor {
+        profile: Some(CredentialProfile {
+            preferences_file: dir.path().join("prefs.json"),
+            service: "test-only".into(),
+        }),
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    let mut panel = Panel::<Value>::default();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    panel.poll(&mut host, &ctx);
+    while panel.archive.loading() && Instant::now() < deadline {
+        panel.poll(&mut host, &ctx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    *panel.prompt_mut() = "Keep this conversation when I enable history again".into();
+    panel.send_with(&mut host, &ctx, |_| Ok(message())).unwrap();
+    finish(&mut panel, &mut host);
+    host.remember_history = false;
+    panel.poll(&mut host, &ctx);
+    assert!(panel.context_items() > 0);
+    host.remember_history = true;
+    panel.poll(&mut host, &ctx);
+    while panel.archive.loading() && Instant::now() < deadline {
+        panel.poll(&mut host, &ctx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    drop(panel);
+    let mut reopened = Panel::<Value>::default();
+    reopened.poll(&mut host, &ctx);
+    while reopened.archive.loading() && Instant::now() < deadline {
+        reopened.poll(&mut host, &ctx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        reopened.context_items() > 0,
+        "enabling saving must persist the existing chat without needing another send"
+    );
 }
 fn args(count: usize) -> Value {
     json!({"editor":"editor","label":"Rename media","commands":(0..count).map(|i|json!({"command":"item.rename","params_json":json!({"id":i,"name":format!("Take {i:02}")}).to_string()})).collect::<Vec<_>>()})

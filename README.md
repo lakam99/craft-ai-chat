@@ -151,6 +151,10 @@ the plugin requests a concise continuation summary (without tools) and replaces
 the model context only after a valid summary succeeds. The readable transcript
 stays separate. Summary requests use the selected model and count as API usage;
 failed compaction retains the full context for retry.
+Opaque provider continuation state stays paired with its tool calls in local
+archives, as required by reasoning models; it is never rendered as chat text.
+When the model changes, tool facts become quoted historical context and the old
+model's opaque state and protocol items are removed together.
 
 Stop prevents further tool dispatch; completed edits
 remain undoable and an in-flight HTTP request can take up to 120 seconds to end.

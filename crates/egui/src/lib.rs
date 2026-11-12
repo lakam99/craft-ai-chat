@@ -382,7 +382,7 @@ impl<T> Panel<T> {
         core::history::omit_media(&mut history);
         core::history::close_pending(&mut history, "The previous turn was interrupted");
         if self.history_model != model {
-            history.retain(|item| item["type"] != "reasoning");
+            core::history::remove_model_state(&mut history);
         }
         history.push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
         self.history = history.clone();

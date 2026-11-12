@@ -78,6 +78,10 @@ impl<T> Panel<T> {
                             self.archive.message = error;
                         }
                         self.history_instance = Some(host.instance());
+                    } else {
+                        // Enabling saving (or Save As onto an existing scope) must save the
+                        // current chat now, without waiting for another message to be sent.
+                        self.persist();
                     }
                 }
                 Ok(None) => {
@@ -141,7 +145,8 @@ impl<T> Panel<T> {
             history.push(progress.clone());
         }
         core::history::omit_media(&mut history);
-        history.retain(|item| item["type"] != "reasoning");
+        // Responses requires reasoning items alongside their function calls/outputs.
+        // Keep the opaque provider state intact; it is never rendered as chat text.
         let mut value = json!({"version":1,"model":self.history_model,"history":history,"transcript":self.chat.transcript});
         if core::bounds::value_size(&value, craft_ai_chat_native::history::MAX_ARCHIVE).is_err() {
             self.archive.message =
