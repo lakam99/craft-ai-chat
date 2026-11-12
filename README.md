@@ -136,9 +136,30 @@ context and blocks delayed edits.
 Send transmits the prompt, conversation, advertised tools and enabled active-view
 context to OpenAI. Requests use `store: false`, retain reasoning items for
 stateless tool turns, and never redirect authorization to another endpoint.
-Chats remain in memory. Stop prevents further tool dispatch; completed edits
+Chats can be saved locally beside the editor preferences, scoped to each project.
+The host supplies `document_key()` (normally the project path) and the
+`remember_history` preference. API keys and image/file attachments are excluded
+from archives. **New chat** clears that project's saved conversation; disable
+**Remember chat history locally** for session-only use. Existing chats from older
+versions cannot be recovered after their context was already discarded.
+
+Tool-limit, network and worker failures preserve the original request and completed
+tool results, so **continue** retains the task. Unanswered calls are explicitly
+marked interrupted; current editor state must be inspected before retrying.
+Older attachments are omitted from subsequent turns. At 96 KiB or 128 items,
+the plugin requests a concise continuation summary (without tools) and replaces
+the model context only after a valid summary succeeds. The readable transcript
+stays separate. Summary requests use the selected model and count as API usage;
+failed compaction retains the full context for retry.
+
+Stop prevents further tool dispatch; completed edits
 remain undoable and an in-flight HTTP request can take up to 120 seconds to end.
 Tool calls are capped at 32 per turn, with bounded bodies/history and timeouts.
+Each `batch_commands` call can execute up to 64 discovered engine commands, in
+order, with one progress card and per-command results. It uses the normal host
+dispatcher and Undo history, yields between commands, and stops on the first
+error. A batch is not an atomic edit or a single Undo step. The full envelope is
+validated before editing; AI controls and recursive batches remain forbidden.
 Tools and transport workers have panic guards, which report failures to the panel.
 
 Protocol reference: [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling).

@@ -8,8 +8,10 @@
     clippy::unreachable
 )]
 
+pub mod batch;
 pub mod bounds;
 pub mod editor;
+pub mod history;
 pub mod protocol;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,7 @@ pub struct Preferences {
     pub model: String,
     pub attach_frames: bool,
     pub remember_key: bool,
+    pub remember_history: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -33,6 +36,7 @@ impl Default for Preferences {
             model: DEFAULT_MODEL.into(),
             attach_frames: true,
             remember_key: true,
+            remember_history: true,
         }
     }
 }

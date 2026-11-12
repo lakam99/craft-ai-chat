@@ -22,5 +22,6 @@ egui_commonmark = { version = "=0.26.0", default-features = false, features = ["
 pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
+tempfile = "3"
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }

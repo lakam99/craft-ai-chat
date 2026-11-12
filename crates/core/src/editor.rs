@@ -120,7 +120,7 @@ impl EditorTools {
         instructions: &str,
         attachment_label: &str,
     ) -> HostInfo {
-        HostInfo {
+        let info = HostInfo {
             id: id.into(),
             name: name.into(),
             instructions: instructions.into(),
@@ -128,11 +128,16 @@ impl EditorTools {
             automatic_inputs: self.automatic_inputs(),
             attachment_label: attachment_label.into(),
             welcome: format!("Ask about your work, request edits, or use {name}'s tools."),
+        };
+        if self.methods.contains(&"engine.execute") {
+            crate::batch::with_batches(info, self.name)
+        } else {
+            info
         }
     }
 }
 
-fn targets_chat(value: &Value, depth: usize) -> bool {
+pub(crate) fn targets_chat(value: &Value, depth: usize) -> bool {
     if depth > 32 {
         return true;
     }

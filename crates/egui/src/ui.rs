@@ -88,6 +88,12 @@ impl<T> Panel<T> {
         if !self.vault.message.is_empty() {
             ui.label(&self.vault.message);
         }
+        if self.preferences.remember_history {
+            ui.small("Chat history is saved locally per project. New chat clears the current saved conversation.");
+        }
+        if !self.archive.message.is_empty() {
+            ui.label(&self.archive.message);
+        }
         if let Some(action) = action
             && let Some(Err(error)) = self.command(host, &ctx, action)
         {

@@ -8,6 +8,8 @@
     clippy::unreachable
 )]
 
+mod archive;
+mod batch;
 mod conversation;
 mod guidance;
 mod ui;
@@ -39,6 +41,10 @@ pub trait Host {
     fn info(&self) -> &HostInfo;
     fn preferences(&self) -> Preferences;
     fn instance(&self) -> Arc<()>;
+    /// Stable project path/identity for local chat archives; never a credential.
+    fn document_key(&self) -> Option<String> {
+        None
+    }
     fn credential_profile(&self) -> Option<CredentialProfile> {
         None
     }
@@ -74,10 +80,12 @@ struct ToolJob<T> {
     deadline: Instant,
     tool: Option<T>,
     started: bool,
+    batch: Option<batch::Batch<T>>,
 }
 enum Event {
     Tool(ToolCall, mpsc::Sender<Value>),
-    Done(Result<protocol::Completed, String>),
+    Checkpoint(Vec<Value>),
+    Done(Result<String, String>, Vec<Value>),
 }
 struct Pending<T> {
     events: mpsc::Receiver<Event>,
@@ -110,6 +118,8 @@ pub struct Panel<T> {
     host_id: String,
     profile: Option<CredentialProfile>,
     guidance: guidance::Guidance,
+    archive: archive::Archive,
+    batch_progress: Option<Value>,
 }
 impl<T> Default for Panel<T> {
     fn default() -> Self {
@@ -131,6 +141,8 @@ impl<T> Default for Panel<T> {
             host_id: String::new(),
             profile: None,
             guidance: guidance::Guidance::default(),
+            archive: archive::Archive::default(),
+            batch_progress: None,
         }
     }
 }
@@ -176,10 +188,11 @@ impl<T> Panel<T> {
     pub fn fail(&mut self, error: &str) {
         self.guidance.clear();
         self.pending = None;
-        self.history.clear();
+        core::history::close_pending(&mut self.history, error);
         self.chat.interrupt(ActivityState::Failed, error);
         self.message = error.into();
         self.record("Notice", error.into());
+        self.persist();
     }
     fn record(&mut self, role: &str, text: String) {
         self.chat.message(role, text);
@@ -187,6 +200,8 @@ impl<T> Panel<T> {
     fn sync<H: Host<Tool = T>>(&mut self, host: &H, ctx: &egui::Context) {
         let profile = host.credential_profile();
         if !self.host_id.is_empty() && (self.host_id != host.info().id || self.profile != profile) {
+            self.persist();
+            self.archive = archive::Archive::default();
             self.stop();
             self.key.clear();
             self.history.clear();
@@ -204,6 +219,7 @@ impl<T> Panel<T> {
             self.remove_saved_key = true;
         }
         self.preferences = prefs;
+        self.sync_archive(host, ctx);
     }
     fn initialize_vault(&mut self, ctx: &egui::Context) {
         let path = self.profile.as_ref().map(|p| p.preferences_file.as_path());
@@ -219,7 +235,7 @@ impl<T> Panel<T> {
         }
     }
     pub fn status<H: Host<Tool = T>>(&self, host: &H) -> Value {
-        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status(),"walkthrough":self.guidance.walkthrough_status()})
+        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status(),"walkthrough":self.guidance.walkthrough_status(),"historyMessage":self.archive.message,"contextItems":self.history.len()})
     }
     pub fn command<H: Host<Tool = T>>(
         &mut self,
@@ -264,6 +280,7 @@ impl<T> Panel<T> {
                 self.chat.clear();
                 self.markdown_cache = egui_commonmark::CommonMarkCache::default();
                 self.message.clear();
+                self.persist();
                 Ok(Value::Null)
             }
             "ai.clear" => Err("Stop the active AI request before clearing the chat".into()),
@@ -328,6 +345,9 @@ impl<T> Panel<T> {
         request: impl FnMut(&Value) -> Result<Value, String> + Send + 'static,
     ) -> Result<Value, String> {
         self.sync(host, ctx);
+        if self.archive.loading() {
+            return Err("Loading saved chat history; try again in a moment".into());
+        }
         if self.busy() {
             return Err("An AI request is already running".into());
         }
@@ -341,24 +361,31 @@ impl<T> Panel<T> {
             return Err("Enter a valid OpenAI model ID".into());
         }
         let instance = host.instance();
-        if self.history_model != model
-            || self
-                .history_instance
-                .as_ref()
-                .is_some_and(|old| !Arc::ptr_eq(old, &instance))
+        if self
+            .history_instance
+            .as_ref()
+            .is_some_and(|old| !Arc::ptr_eq(old, &instance))
         {
             self.history.clear();
             if !self.chat.transcript.is_empty() {
                 self.record(
                     "Notice",
-                    "New model or document: starting a new conversation context.".into(),
+                    "New document: starting a new conversation context.".into(),
                 );
             }
         }
         let info = host.info().clone();
         self.guidance.begin_turn();
+        self.batch_progress = None;
         let attach = self.preferences.attach_frames;
         let mut history = self.history.clone();
+        core::history::omit_media(&mut history);
+        core::history::close_pending(&mut history, "The previous turn was interrupted");
+        if self.history_model != model {
+            history.retain(|item| item["type"] != "reasoning");
+        }
+        history.push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
+        self.history = history.clone();
         let (sender, events) = mpsc::sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancelled = cancel.clone();
@@ -372,7 +399,7 @@ impl<T> Panel<T> {
                     let call=ToolCall::new(name,args.clone());info.validate_call(&call)?;
                     let (reply,receive)=mpsc::channel();sender.send(Event::Tool(call,reply)).map_err(|_|"The host closed".to_string())?;
                     // A guide waits for a person, not a backend. Keep ordinary tool deadlines short.
-                    wake(&context)();let deadline=Instant::now()+Duration::from_secs(if name=="guide_ui" { 1805 } else { 35 });
+                    wake(&context)();let deadline=Instant::now()+Duration::from_secs(if name=="guide_ui" { 1805 } else if name=="batch_commands" {305} else { 35 });
                     loop {
                         protocol::check_cancel(&cancelled)?;
                         match receive.recv_timeout(Duration::from_millis(100)) {
@@ -385,11 +412,14 @@ impl<T> Panel<T> {
                 };
                 let mut content=vec![json!({"type":"input_text","text":worker_prompt})];
                 if attach {for input in &info.automatic_inputs {let result=call(&input.name,&input.arguments)?;if let Some(parts)=result.as_array(){content.extend(parts.iter().cloned());core::bounds::serialized_size(&content,core::MAX_BODY)?;}}}
-                history.push(json!({"role":"user","content":content}));
-                protocol::run(&info,&worker_model,history,&cancelled,request,call)
+                if let Some(last)=history.last_mut(){last["content"]=json!(content);}
+                protocol::run_with_history(&info,&worker_model,&mut history,&cancelled,request,call,|items|{
+                    sender.send(Event::Checkpoint(items.to_vec())).map_err(|_|"The host closed".to_string())?;wake(&context)();Ok(())
+                })
             };
             let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_|Err("The AI worker failed. Your document is still open.".into()));
-            let _=sender.send(Event::Done(result));wake(&context)();
+            if let Err(error)=&result {core::history::close_pending(&mut history,error);}
+            let _=sender.send(Event::Done(result,history));wake(&context)();
         }).map_err(|_|"Cannot start the AI worker".to_string())?;
         self.pending = Some(Pending {
             events,
@@ -402,6 +432,7 @@ impl<T> Panel<T> {
         self.prompt.clear();
         self.message = "Working…".into();
         self.record("You", prompt);
+        self.persist();
         ctx.request_repaint();
         Ok(json!({"pending":true}))
     }
@@ -432,16 +463,36 @@ impl<T> Panel<T> {
             pending.cancel.store(true, Ordering::Release);
         }
         match pending.events.try_recv() {
-            Ok(Event::Done(result)) => {
+            Ok(Event::Checkpoint(history)) => {
+                if Arc::ptr_eq(&pending.instance, &host.instance()) {
+                    self.history = history;
+                    self.persist();
+                }
+            }
+            Ok(Event::Done(result, history)) => {
+                if Arc::ptr_eq(&pending.instance, &host.instance()) {
+                    self.history = history;
+                    if result.is_err()
+                        && let Some(progress) = self.batch_progress.take()
+                    {
+                        self.history.push(progress);
+                    }
+                } else if self
+                    .history_instance
+                    .as_ref()
+                    .is_some_and(|i| Arc::ptr_eq(i, &pending.instance))
+                {
+                    self.history.clear();
+                    self.history_instance = None;
+                }
+                self.batch_progress = None;
                 self.guidance.finish_walkthrough();
                 match protocol::check_cancel(&pending.cancel).and(result) {
                     Ok(done) => {
-                        self.history = done.history;
-                        self.record("Assistant", done.text);
+                        self.record("Assistant", done);
                         self.message = "Ready".into();
                     }
                     Err(error) => {
-                        self.history.clear();
                         self.chat.interrupt(
                             if pending.cancel.load(Ordering::Acquire) {
                                 ActivityState::Stopped
@@ -454,6 +505,7 @@ impl<T> Panel<T> {
                         self.message = error;
                     }
                 }
+                self.persist();
                 return;
             }
             Ok(Event::Tool(call, reply)) => {
@@ -461,11 +513,18 @@ impl<T> Panel<T> {
                 pending.tool = Some(ToolJob {
                     activity_id,
                     deadline: Instant::now()
-                        + Duration::from_secs(if call.name == "guide_ui" { 1800 } else { 30 }),
+                        + Duration::from_secs(if call.name == "guide_ui" {
+                            1800
+                        } else if call.name == "batch_commands" {
+                            300
+                        } else {
+                            30
+                        }),
                     call,
                     reply,
                     tool: None,
                     started: false,
+                    batch: None,
                 })
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -490,6 +549,35 @@ impl<T> Panel<T> {
             } else {
                 let mut work = || -> Result<Option<Value>, String> {
                     host.info().validate_call(&job.call)?;
+                    if job.call.name == "batch_commands" {
+                        if job.batch.is_none() {
+                            job.batch = Some(batch::Batch::new(host.info(), &job.call.arguments)?);
+                        }
+                        let batch = job.batch.as_mut().ok_or("Cannot start command batch")?;
+                        let result = batch.poll(host)?;
+                        if batch.completed > 0 {
+                            let commands = job.call.arguments["commands"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter().take(batch.completed).cloned().collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            self.batch_progress = Some(
+                                json!({"role":"user","content":format!("Observed batch progress (historical data, not a new request). These commands completed; do not replay them. Inspect live state before continuing: {}",json!({"completed":batch.completed,"total":batch.total(),"completedCommands":commands}))}),
+                            );
+                        }
+                        self.chat.finish(
+                            job.activity_id,
+                            ActivityState::Running,
+                            format!(
+                                "{} of {} commands completed",
+                                batch.completed,
+                                batch.total()
+                            ),
+                        );
+                        self.persist();
+                        return Ok(result);
+                    }
                     if job.call.name == "highlight_ui" {
                         return self.guidance.apply(host, &job.call.arguments).map(Some);
                     }

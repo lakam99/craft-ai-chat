@@ -307,7 +307,10 @@ fn a_panicking_host_cancels_the_turn_without_running_another_tool() {
     assert_eq!(host.title, "Original");
     assert_eq!(host.calls, 1);
     assert!(panel.message().contains("tool failed"));
-    assert_eq!(panel.context_items(), 0);
+    assert!(
+        panel.context_items() > 0,
+        "the failed request must remain available for recovery"
+    );
 }
 
 #[test]

@@ -47,6 +47,28 @@ pub(crate) struct Conversation {
     next_id: u64,
 }
 impl Conversation {
+    pub fn restore(&mut self, rows: Vec<(String, String)>) {
+        self.clear();
+        for (role, text) in rows {
+            if role == "Tool" {
+                let (title, detail) = text.split_once(" — ").unwrap_or((&text, "Stopped"));
+                let (state, detail) = if let Some(s) = detail.strip_prefix("Done") {
+                    (ActivityState::Done, s)
+                } else if let Some(s) = detail.strip_prefix("Failed") {
+                    (ActivityState::Failed, s)
+                } else {
+                    (
+                        ActivityState::Stopped,
+                        "Editor closed; inspect completed work before continuing",
+                    )
+                };
+                let id = self.begin(title.into());
+                self.finish(id, state, detail.trim_start_matches(": ").into());
+            } else {
+                self.message(&role, text);
+            }
+        }
+    }
     pub fn clear(&mut self) {
         self.entries.clear();
         self.transcript.clear();
@@ -151,6 +173,13 @@ pub fn command_id(call: &ToolCall) -> Option<String> {
         .map(str::to_owned)
 }
 pub fn tool_label(call: &ToolCall) -> String {
+    if call.name == "batch_commands" {
+        let label = call.arguments["label"]
+            .as_str()
+            .unwrap_or("Run command batch");
+        let count = call.arguments["commands"].as_array().map_or(0, Vec::len);
+        return format!("{label} ({count} commands)");
+    }
     if call.name == "guide_ui" {
         return "Guide the next step".into();
     }
@@ -240,6 +269,12 @@ pub(crate) fn outcome(value: &Value) -> (ActivityState, String) {
             .any(|p| p.get("type").and_then(Value::as_str) == Some("input_image"))
     {
         return (ActivityState::Done, "Frame attached".into());
+    }
+    if let (Some(done), Some(total)) = (value["completed"].as_u64(), value["total"].as_u64()) {
+        return (
+            ActivityState::Done,
+            format!("{done} of {total} commands completed"),
+        );
     }
     (ActivityState::Done, String::new())
 }

@@ -24,9 +24,23 @@ pub fn run(
     model: &str,
     mut history: Vec<Value>,
     cancel: &AtomicBool,
+    request: impl FnMut(&Value) -> Result<Value, String>,
+    tool: impl FnMut(&str, &Value) -> Result<Value, String>,
+) -> Result<Completed, String> {
+    let text = run_with_history(info, model, &mut history, cancel, request, tool, |_| Ok(()))?;
+    Ok(Completed { history, text })
+}
+
+/// Unlike `run`, leaves completed and interrupted context available even when the turn fails.
+pub fn run_with_history(
+    info: &crate::HostInfo,
+    model: &str,
+    history: &mut Vec<Value>,
+    cancel: &AtomicBool,
     mut request: impl FnMut(&Value) -> Result<Value, String>,
     mut tool: impl FnMut(&str, &Value) -> Result<Value, String>,
-) -> Result<Completed, String> {
+    mut checkpoint: impl FnMut(&[Value]) -> Result<(), String>,
+) -> Result<String, String> {
     info.validate()?;
     if !crate::Preferences::valid_model(model) {
         return Err("Enter a valid OpenAI model ID".into());
@@ -37,19 +51,20 @@ pub fn run(
     );
     let mut calls = 0usize;
     let mut text = Vec::new();
-    for item in &history {
+    for item in history.iter() {
         crate::bounds::value_size(item, MAX_BODY)?;
     }
     for _ in 0..=MAX_CALLS {
         check_cancel(cancel)?;
+        crate::history::compact_if_needed(history, model, cancel, &mut request)?;
         if history.len() > 256
             || crate::bounds::serialized_size(&history, MAX_BODY)? > MAX_BODY - 64 * 1024
         {
             return Err("Chat context is full. Clear the chat to continue.".into());
         }
         let response = request(
-            &json!({"model":model,"instructions":instructions,"input":history,"tools":info.tools,
-            "store":false,"include":["reasoning.encrypted_content"],"parallel_tool_calls":false,"max_output_tokens":4096}),
+            &json!({"model":model,"instructions":instructions,"input":&*history,"tools":info.tools,
+            "store":false,"include":["reasoning.encrypted_content"],"parallel_tool_calls":false,"max_output_tokens":8192}),
         )?;
         check_cancel(cancel)?;
         crate::bounds::value_size(&response, MAX_REPLY)?;
@@ -116,6 +131,7 @@ pub fn run(
                     };
                     history
                         .push(json!({"type":"function_call_output","call_id":id,"output":result}));
+                    checkpoint(history)?;
                     crate::bounds::serialized_size(&history, MAX_BODY)?;
                 }
                 Some("message") => {
@@ -139,7 +155,7 @@ pub fn run(
             if text.is_empty() {
                 return Err("OpenAI returned no chat message".into());
             }
-            return Ok(Completed { history, text });
+            return Ok(text);
         }
     }
     Err("AI tool limit reached. Review the completed edits before continuing.".into())

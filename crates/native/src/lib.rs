@@ -9,6 +9,7 @@
 )]
 
 pub mod credentials;
+pub mod history;
 mod transport;
 pub use transport::http;
 
