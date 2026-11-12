@@ -11,6 +11,20 @@ pub fn with_guidance(mut info: HostInfo) -> HostInfo {
         json!({"type":"object","properties":{"targets":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":256},"label":{"type":"string","maxLength":160}},"required":["id","label"],"additionalProperties":false}}},"required":["targets"],"additionalProperties":false}),
     ));
     info.instructions.push_str(" When the user asks how to do something, guide them instead of performing the edit. Inspect ui.elements, then use highlight_ui with actual visible widget IDs and short action labels. Match numbered instructions to the numbered outlines. Open a relevant panel or menu using advertised UI tools when necessary, inspect again, and highlight its controls. Do not execute the requested edit unless asked to do it. Never invent a target or claim a control was highlighted when the tool returned an error. Highlighting does not click controls, change values or change the document. Use an empty targets array to clear highlights.");
+    info.tools.push(function("guide_state", "Read small, read-only editor state for verifying a walkthrough step. No credentials or UI drafts.", json!({"type":"object","properties":{},"additionalProperties":false})));
+    info.tools.push(function("guide_ui", "Show ONE walkthrough step and wait for the user to complete it. This tool does not click or edit. It returns only after completion, confirmation, cancellation or a 30-minute timeout. Discover the visible target with ui.elements and state fields with guide_state first.", json!({
+        "type":"object","properties":{
+            "id":{"type":"string","maxLength":256,"description":"Visible widget ID to highlight."},
+            "label":{"type":"string","maxLength":160,"description":"Short action label."},
+            "instruction":{"type":"string","maxLength":4096,"description":"Instructions for this step only, in Markdown."},
+            "completion":{"type":"string","enum":["activate","change","appear","disappear","state","confirm"],"description":"activate: button clicked; change: value edited and editing finished; appear/disappear: watched UI control changes visibility; state: editor result satisfies condition; confirm: user manually confirms."},
+            "watch_id":{"type":"string","maxLength":256,"description":"Control watched by appear/disappear. Empty for other completion modes."},
+            "state_pointer":{"type":"string","maxLength":256,"description":"JSON pointer from guide_state for state completion, otherwise empty."},
+            "comparison":{"type":"string","enum":["equal","not_equal","greater"],"description":"State comparison; use equal for non-state completion."},
+            "expected_json":{"type":"string","maxLength":1024,"description":"JSON scalar for state comparison, otherwise empty."}
+        },"required":["id","label","instruction","completion","watch_id","state_pointer","comparison","expected_json"],"additionalProperties":false
+    })));
+    info.instructions.push_str(" For a step-by-step walkthrough, use guide_ui for just the CURRENT step. Explain it in instruction and wait for that tool to return before planning or highlighting the next step. After completion, inspect the updated editor with ui.elements/guide_state and adapt the next instruction. Do not perform the user's actions or open later steps for them. Prefer state completion to verify an actual result (such as an increased media count), not merely clicking Import or closing a dialog: cancelling or failing a dialog is not completion. Use activate for actions whose completion is the button activation itself, change for an observed value edit, appear/disappear for UI navigation only, and confirm for unobservable work. Never claim user_confirmation was automatically verified. Do not use highlight_ui to replace an interactive walkthrough. End with a concise summary when the goal is complete; respect cancellation. State fields and target IDs must be discovered, never guessed.");
     info
 }
 

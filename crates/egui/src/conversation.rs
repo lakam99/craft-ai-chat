@@ -151,6 +151,12 @@ pub fn command_id(call: &ToolCall) -> Option<String> {
         .map(str::to_owned)
 }
 pub fn tool_label(call: &ToolCall) -> String {
+    if call.name == "guide_ui" {
+        return "Guide the next step".into();
+    }
+    if call.name == "guide_state" {
+        return "Check editor progress".into();
+    }
     if call.name == "highlight_ui" {
         return "Highlight editor controls".into();
     }

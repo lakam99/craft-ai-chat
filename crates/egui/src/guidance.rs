@@ -9,6 +9,9 @@ pub struct HighlightTarget {
     pub rect: Rect,
     pub viewport: egui::ViewportId,
 }
+mod walkthrough;
+pub use walkthrough::Observation;
+pub(super) use walkthrough::state;
 
 #[cfg(test)]
 mod tests;
@@ -33,12 +36,15 @@ pub(super) struct Guidance {
     visible: HashSet<String>,
     instance: Option<Arc<()>>,
     dismissed: bool,
+    step: Option<walkthrough::Step>,
+    step_number: usize,
 }
 impl Guidance {
     pub(super) fn clear(&mut self) {
         self.targets.clear();
         self.visible.clear();
         self.instance = None;
+        self.step = None;
     }
     pub(super) fn dismiss(&mut self) {
         self.clear();
@@ -47,6 +53,7 @@ impl Guidance {
     pub(super) fn begin_turn(&mut self) {
         self.clear();
         self.dismissed = false;
+        self.step_number = 0;
     }
     pub(super) fn apply<H: Host>(&mut self, host: &H, args: &Value) -> Result<Value, String> {
         if self.dismissed {
@@ -86,6 +93,7 @@ impl Guidance {
         }
         // All targets are validated before replacing an existing guide.
         self.targets = args.targets;
+        self.step = None;
         self.visible = self
             .targets
             .iter()
@@ -106,7 +114,7 @@ impl Guidance {
         }
     }
     pub(super) fn status(&self) -> Value {
-        json!(self.targets.iter().enumerate().map(|(n,t)|json!({"number":n+1,"id":t.id,"label":t.label,"visible":self.visible.contains(&t.id)})).collect::<Vec<_>>())
+        json!(self.targets.iter().enumerate().map(|(n,t)|json!({"number":self.number(n),"id":t.id,"label":t.label,"visible":self.visible.contains(&t.id)})).collect::<Vec<_>>())
     }
 }
 fn core_size(args: &Value) -> Result<(), String> {
@@ -132,8 +140,9 @@ impl<T> Panel<T> {
                 )
             })
         }) {
-            self.guidance.dismiss();
+            self.dismiss_guidance();
         }
+        self.guidance.observe_step(host, ctx);
         if ctx.will_discard() {
             return;
         }
@@ -194,7 +203,7 @@ impl<T> Panel<T> {
             painter.text(
                 center,
                 Align2::CENTER_CENTER,
-                (number + 1).to_string(),
+                self.guidance.number(number).to_string(),
                 FontId::proportional(12.0),
                 visuals.text_color(),
             );
@@ -207,11 +216,15 @@ impl<T> Panel<T> {
         }
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.strong("Highlighted in the editor");
+                ui.strong(if self.guidance.step.is_some() {
+                    "Step-by-step guide"
+                } else {
+                    "Highlighted in the editor"
+                });
                 let clear = ui.small_button("Clear highlights");
                 host.widget("ai.clearHighlights", &clear, "Clear editor highlights");
                 if clear.clicked() {
-                    self.guidance.dismiss();
+                    self.dismiss_guidance();
                 }
             });
             // A long guide must not push the composer or the dismissal button out of a small dock.
@@ -225,13 +238,14 @@ impl<T> Panel<T> {
                         let visible = self.guidance.visible.contains(&target.id);
                         ui.label(format!(
                             "{}. {}{}",
-                            n + 1,
+                            self.guidance.number(n),
                             target.label,
                             if visible { "" } else { " (control hidden)" }
                         ));
                     }
                 });
             ui.small("Press Esc to dismiss. Highlighting does not perform the action.");
+            self.walkthrough_controls(host, ui);
         });
     }
 }

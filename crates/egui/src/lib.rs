@@ -20,7 +20,7 @@ use craft_ai_chat_native::{
     Wake,
     credentials::{Action, Vault},
 };
-pub use guidance::HighlightTarget;
+pub use guidance::{HighlightTarget, Observation};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -48,6 +48,14 @@ pub trait Host {
     fn highlight_target(&self, _id: &str) -> Option<HighlightTarget> {
         None
     }
+    /// Current-pass widget events only, never synthesized clicks or cached coordinates.
+    fn guide_observation(&self, _id: &str, _ctx: &egui::Context) -> Option<Observation> {
+        None
+    }
+    /// Small, read-only document counters/state. Exclude credentials and private UI drafts.
+    fn guide_state(&self) -> Value {
+        Value::Null
+    }
     fn start_tool(&mut self, call: &ToolCall) -> Result<Self::Tool, String>;
     fn poll_tool(&mut self, tool: &mut Self::Tool) -> Result<Option<Value>, String>;
     fn set_preference(&mut self, key: &str, value: Value) -> Result<(), String>;
@@ -65,6 +73,7 @@ struct ToolJob<T> {
     reply: mpsc::Sender<Value>,
     deadline: Instant,
     tool: Option<T>,
+    started: bool,
 }
 enum Event {
     Tool(ToolCall, mpsc::Sender<Value>),
@@ -210,7 +219,7 @@ impl<T> Panel<T> {
         }
     }
     pub fn status<H: Host<Tool = T>>(&self, host: &H) -> Value {
-        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status()})
+        json!({"open":host.chat_is_open(),"busy":self.busy(),"hasKey":self.has_key(),"savedKey":self.vault.saved(),"credentialBusy":self.vault.busy(),"credentialMessage":self.vault.message,"message":self.message,"transcript":self.chat.transcript,"highlights":self.guidance.status(),"walkthrough":self.guidance.walkthrough_status()})
     }
     pub fn command<H: Host<Tool = T>>(
         &mut self,
@@ -242,7 +251,7 @@ impl<T> Panel<T> {
             "ai.settings" => host.open_preferences().map(|()| Value::Null),
             "ai.send" => self.send(host, ctx),
             "ai.clearHighlights" => {
-                self.guidance.dismiss();
+                self.dismiss_guidance();
                 Ok(Value::Null)
             }
             "ai.stop" => {
@@ -362,7 +371,8 @@ impl<T> Panel<T> {
                     protocol::check_cancel(&cancelled)?;
                     let call=ToolCall::new(name,args.clone());info.validate_call(&call)?;
                     let (reply,receive)=mpsc::channel();sender.send(Event::Tool(call,reply)).map_err(|_|"The host closed".to_string())?;
-                    wake(&context)();let deadline=Instant::now()+Duration::from_secs(35);
+                    // A guide waits for a person, not a backend. Keep ordinary tool deadlines short.
+                    wake(&context)();let deadline=Instant::now()+Duration::from_secs(if name=="guide_ui" { 1805 } else { 35 });
                     loop {
                         protocol::check_cancel(&cancelled)?;
                         match receive.recv_timeout(Duration::from_millis(100)) {
@@ -423,6 +433,7 @@ impl<T> Panel<T> {
         }
         match pending.events.try_recv() {
             Ok(Event::Done(result)) => {
+                self.guidance.finish_walkthrough();
                 match protocol::check_cancel(&pending.cancel).and(result) {
                     Ok(done) => {
                         self.history = done.history;
@@ -449,10 +460,12 @@ impl<T> Panel<T> {
                 let activity_id = self.chat.begin(host.tool_label(&call));
                 pending.tool = Some(ToolJob {
                     activity_id,
+                    deadline: Instant::now()
+                        + Duration::from_secs(if call.name == "guide_ui" { 1800 } else { 30 }),
                     call,
                     reply,
-                    deadline: Instant::now() + Duration::from_secs(30),
                     tool: None,
+                    started: false,
                 })
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -479,6 +492,32 @@ impl<T> Panel<T> {
                     host.info().validate_call(&job.call)?;
                     if job.call.name == "highlight_ui" {
                         return self.guidance.apply(host, &job.call.arguments).map(Some);
+                    }
+                    if job.call.name == "guide_state" {
+                        if !job
+                            .call
+                            .arguments
+                            .as_object()
+                            .is_some_and(|args| args.is_empty())
+                        {
+                            return Err("guide_state takes no parameters".into());
+                        }
+                        return guidance::state(host).map(Some);
+                    }
+                    if job.call.name == "guide_ui" {
+                        if !job.started {
+                            let instruction =
+                                self.guidance.start_step(host, &job.call.arguments)?;
+                            self.record("Assistant", instruction);
+                            self.message =
+                                "Waiting for you to complete the highlighted step".into();
+                            job.started = true;
+                        }
+                        let result = self.guidance.step_result(host)?;
+                        if result.is_some() {
+                            self.message = "Checking the next step…".into();
+                        }
+                        return Ok(result);
                     }
                     if job.tool.is_none() {
                         job.tool = Some(host.start_tool(&job.call)?);

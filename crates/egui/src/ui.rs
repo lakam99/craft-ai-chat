@@ -175,9 +175,13 @@ impl<T> Panel<T> {
                             if response.clicked() {
                                 action = Some("ai.stop");
                             }
-                            ui.spinner();
+                            if !self.guidance.waiting_for_user() {
+                                ui.spinner();
+                            }
                             ui.small(if stopping {
                                 "Stopping…"
+                            } else if self.guidance.waiting_for_user() {
+                                "Waiting for you…"
                             } else {
                                 "Working in the editor…"
                             });

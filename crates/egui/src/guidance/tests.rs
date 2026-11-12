@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
+mod walkthrough;
 
 struct Editor {
     info: HostInfo,
@@ -12,6 +13,8 @@ struct Editor {
     widgets: HashMap<String, Rect>,
     edits: usize,
     escaped: bool,
+    observation: Observation,
+    items: usize,
 }
 impl Default for Editor {
     fn default() -> Self {
@@ -31,6 +34,8 @@ impl Default for Editor {
             .into(),
             edits: 0,
             escaped: false,
+            observation: Observation::default(),
+            items: 0,
         }
     }
 }
@@ -54,6 +59,12 @@ impl Host for Editor {
     fn start_tool(&mut self, _: &ToolCall) -> Result<(), String> {
         self.edits += 1;
         Err("Guidance must not dispatch an editor action".into())
+    }
+    fn guide_observation(&self, _: &str, _: &Context) -> Option<Observation> {
+        Some(self.observation)
+    }
+    fn guide_state(&self) -> Value {
+        json!({"items":self.items})
     }
     fn poll_tool(&mut self, _: &mut ()) -> Result<Option<Value>, String> {
         Ok(None)

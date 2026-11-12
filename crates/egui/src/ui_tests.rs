@@ -253,6 +253,7 @@ fn timed_out_actions_fail_and_cancelled_actions_stop() {
             cancel: Arc::new(AtomicBool::new(stopped)),
             instance: host.instance(),
             tool: Some(ToolJob {
+                started: false,
                 activity_id,
                 call: ToolCall::new("inspect", json!({})),
                 reply,

@@ -102,6 +102,28 @@ guidance programmatically. Invalid or reserved AI targets are rejected before
 changing an existing guide. “How do I” instructions ask the assistant to guide
 instead of performing the edit.
 
+### Interactive walkthroughs
+
+Ask for a step-by-step guide to highlight **one control at a time**. `guide_ui`
+shows the current instruction in Markdown and waits for the user before returning
+to the AI. The AI then inspects the updated editor and chooses the next control,
+including controls that only appeared after the preceding step. No API requests
+are made while waiting for the user's action.
+
+Adapters implement `Host::guide_observation` from current-pass widget responses
+and `Host::guide_state` with small, read-only counters/state, excluding credentials
+and private drafts. `guide_state` advertises the available fields. A step can wait
+for a button activation, a completed value edit, a visibility transition, or a
+state comparison. Use result comparisons for operations such as file imports:
+opening or cancelling a dialog is not successful completion. Plain painted areas
+without a widget response support visibility/state checks or manual confirmation.
+
+**Pause guide** suspends advancement; **Resume guide** checks again. **I've done
+this** explicitly reports user confirmation rather than automatic verification.
+Clear highlights, Escape, Stop and document replacement cancel the walkthrough.
+Each human step has a bounded 30-minute wait; normal backend tools keep their
+short timeouts, and the existing per-turn tool/history limits still apply.
+
 ## Privacy and lifecycle
 
 The key stays in session memory or the OS credential store, never ordinary
