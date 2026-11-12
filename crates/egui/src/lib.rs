@@ -381,6 +381,13 @@ impl<T> Panel<T> {
         let mut history = self.history.clone();
         core::history::omit_media(&mut history);
         core::history::close_pending(&mut history, "The previous turn was interrupted");
+        // Compaction can fail while offline. Bound retained recovery data before
+        // accepting another message, without discarding the existing task or draft.
+        if history.len() >= 512
+            || core::bounds::serialized_size(&history, core::MAX_BODY - 64 * 1024).is_err()
+        {
+            return Err("Chat recovery context is full. Your existing history and draft are preserved. Copy the instructions you need, then start a new chat to continue.".into());
+        }
         if self.history_model != model {
             core::history::remove_model_state(&mut history);
         }

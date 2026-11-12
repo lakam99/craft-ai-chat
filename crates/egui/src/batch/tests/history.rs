@@ -1,5 +1,30 @@
 use super::*;
 #[test]
+fn repeated_failed_compaction_cannot_grow_context_without_bound() {
+    let mut host = Editor::default();
+    let mut panel = Panel::<Value> {
+        history: (0..512)
+            .map(|i| json!({"role":"user","content":format!("Preserved instruction {i}")}))
+            .collect(),
+        ..Default::default()
+    };
+    *panel.prompt_mut() = "Keep this draft".into();
+    let previous = panel.history.clone();
+    for _ in 0..3 {
+        assert!(
+            panel
+                .send_with(&mut host, &egui::Context::default(), |_| panic!(
+                    "a full recovery context must reject before another API request"
+                ))
+                .is_err()
+        );
+        assert_eq!(panel.history, previous);
+        assert_eq!(panel.prompt_mut(), "Keep this draft");
+        assert!(!panel.busy());
+    }
+    assert!(host.undo.is_empty());
+}
+#[test]
 fn restart_preserves_required_reasoning_and_tool_pairs_without_replaying_edits() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Editor {

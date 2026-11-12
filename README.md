@@ -155,6 +155,8 @@ Opaque provider continuation state stays paired with its tool calls in local
 archives, as required by reasoning models; it is never rendered as chat text.
 When the model changes, tool facts become quoted historical context and the old
 model's opaque state and protocol items are removed together.
+Repeated failed compaction cannot grow recovery history indefinitely. At the
+recovery budget, another message is refused with the draft and history intact.
 
 Stop prevents further tool dispatch; completed edits
 remain undoable and an in-flight HTTP request can take up to 120 seconds to end.
