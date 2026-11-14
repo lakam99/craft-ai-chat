@@ -62,18 +62,35 @@ pub fn compact_if_needed(
     cancel: &AtomicBool,
     request: &mut impl FnMut(&Value) -> Result<Value, String>,
 ) -> Result<(), String> {
-    let mut text = items.clone();
+    let mut reduced = items.clone();
+    crate::editor::discovery::reduce_history(&mut reduced);
+    let mut text = reduced.clone();
     omit_media(&mut text);
     // Image/file bytes are not text tokens. A fresh active frame must reach the editing model.
     if items.len() <= COMPACT_ITEMS && bounds::serialized_size(&text, COMPACT_BYTES).is_ok() {
+        *items = reduced;
         return Ok(());
     }
     check_cancel(cancel)?;
-    let response = request(
-        &json!({"model":model,"instructions":SUMMARY_INSTRUCTIONS,"input":text,"tools":[],"store":false,"max_output_tokens":2400}),
+    // A summary is a separate task. Quoted tool facts suffice; carrying the editor's opaque
+    // reasoning into it can continue that task instead of producing a short summary.
+    remove_model_state(&mut text);
+    let mut response = request(
+        &json!({"model":model,"instructions":SUMMARY_INSTRUCTIONS,"input":text,"tools":[],"store":false,"max_output_tokens":8192}),
     )?;
     check_cancel(cancel)?;
     bounds::value_size(&response, crate::MAX_REPLY)?;
+    if response["status"] == "incomplete"
+        && response["incomplete_details"]["reason"] == "max_output_tokens"
+    {
+        // Reasoning consumes the same output budget as the visible summary. Retry only this
+        // specific exhaustion once; never accept a partial summary or replay editor actions.
+        response = request(
+            &json!({"model":model,"instructions":SUMMARY_INSTRUCTIONS,"input":text,"tools":[],"store":false,"max_output_tokens":16384}),
+        )?;
+        check_cancel(cancel)?;
+        bounds::value_size(&response, crate::MAX_REPLY)?;
+    }
     if response["status"] != "completed" {
         return Err(
             "Context compaction did not finish. Your chat history is preserved; retry to continue."
@@ -241,6 +258,82 @@ mod tests {
                 .is_err()
             );
             assert_eq!(items, original);
+        }
+    }
+    #[test]
+    fn legacy_saved_catalogs_are_reduced_without_summarizing_or_losing_user_work() {
+        let commands: Vec<_> = (0..600)
+            .map(|i| json!({"id":format!("synth.control{i}"),"params":"x".repeat(256)}))
+            .collect();
+        let prompt =
+            json!({"role":"user","content":"Make this sound like a trumpet; keep my MIDI notes"});
+        let edit = json!({"type":"function_call_output","call_id":"edit","output":"{\"renamed\":false,\"preserved_notes\":true}"});
+        let frame = json!({"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,CURRENT"}]});
+        let mut history = vec![
+            prompt.clone(),
+            json!({"type":"function_call","call_id":"catalog","name":"soundcraft","arguments":"{\"method\":\"engine.commands\",\"params_json\":\"{}\"}"}),
+            json!({"type":"function_call_output","call_id":"catalog","output":json!({"ok":true,"result":commands}).to_string()}),
+            edit.clone(),
+            frame.clone(),
+        ];
+        compact_if_needed(
+            &mut history,
+            "gpt-6-luna",
+            &AtomicBool::new(false),
+            &mut |_| panic!("Catalog metadata must be reduced locally, without a paid summary"),
+        )
+        .unwrap();
+        assert_eq!(history[0], prompt);
+        assert_eq!(history[3], edit);
+        assert_eq!(history[4], frame);
+        assert_eq!(history[1]["call_id"], history[2]["call_id"]);
+        assert!(history[2]["output"].as_str().unwrap().contains("topics"));
+        assert!(bounds::serialized_size(&history, COMPACT_BYTES).is_ok());
+    }
+    #[test]
+    fn summary_output_exhaustion_retries_once_without_opaque_editor_reasoning() {
+        let original = vec![
+            json!({"role":"user","content":"x".repeat(COMPACT_BYTES)}),
+            json!({"type":"reasoning","encrypted_content":"EDITOR_STATE"}),
+        ];
+        for succeeds in [true, false] {
+            let mut history = original.clone();
+            let mut calls = 0;
+            let result = compact_if_needed(
+                &mut history,
+                "gpt-6-luna",
+                &AtomicBool::new(false),
+                &mut |body| {
+                    calls += 1;
+                    assert_eq!(body["model"], "gpt-6-luna");
+                    assert_eq!(
+                        body["max_output_tokens"],
+                        if calls == 1 { 8192 } else { 16384 }
+                    );
+                    assert!(!body["input"].to_string().contains("EDITOR_STATE"));
+                    assert_eq!(body["tools"], json!([]));
+                    if calls == 2 && succeeds {
+                        Ok(
+                            json!({"status":"completed","output":[{"type":"message","content":[{"text":"Keep the trumpet request and existing notes."}]}]}),
+                        )
+                    } else {
+                        Ok(
+                            json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"text":"unsafe partial summary"}]}]}),
+                        )
+                    }
+                },
+            );
+            assert_eq!(calls, 2);
+            assert_eq!(result.is_ok(), succeeds);
+            if !succeeds {
+                assert_eq!(history, original);
+            } else {
+                assert!(
+                    !serde_json::to_string(&history)
+                        .unwrap()
+                        .contains("unsafe partial summary")
+                );
+            }
         }
     }
     #[test]

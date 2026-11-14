@@ -50,6 +50,7 @@ pub fn run_with_history(
         info.name, BASE_INSTRUCTIONS, info.instructions
     );
     let mut calls = 0usize;
+    let mut index_seen = false;
     let mut text = Vec::new();
     for item in history.iter() {
         crate::bounds::value_size(item, MAX_BODY)?;
@@ -107,7 +108,17 @@ pub fn run_with_history(
                         Ok(args) => {
                             let call = crate::ToolCall::new(name, args);
                             info.validate_call(&call)
+                                .and_then(|()| {
+                                    if crate::editor::discovery::is_index(&call) {
+                                        if index_seen {
+                                            return Err("The command topic index was already discovered this turn. Reuse it; request engine.commands with filter for a topic or exact ID instead of repeating the full catalog.".into());
+                                        }
+                                        index_seen = true;
+                                    }
+                                    Ok(())
+                                })
                                 .and_then(|()| tool(&call.name, &call.arguments))
+                                .and_then(|result| crate::editor::discovery::compact(&call, result))
                         }
                         Err(_) => Err("Tool arguments must be a JSON object".into()),
                     };
