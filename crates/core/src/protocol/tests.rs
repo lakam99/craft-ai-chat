@@ -20,6 +20,31 @@ fn function(args: &str) -> Value {
 }
 
 #[test]
+fn a_large_command_catalog_does_not_force_summary_before_the_next_editor_step() {
+    let catalog: Vec<_> = (0..600)
+        .map(|i| json!({"id":format!("synth.control{i}"),"label":format!("Synth control {i}"),"params":format!("{{track,value}} {}","details ".repeat(30)),"enabled":true}))
+        .collect();
+    assert!(serde_json::to_vec(&catalog).unwrap().len() > crate::history::COMPACT_BYTES);
+    let mut turns = 0;
+    let result = run(
+        &host(), "gpt-6-luna", vec![json!({"role":"user","content":"Make my MIDI track sound like a trumpet; keep its notes and name"})],
+        &AtomicBool::new(false),
+        |body| {
+            assert!(!body["tools"].as_array().unwrap().is_empty(), "A read-only command catalog must not cause an extra summarization request");
+            turns += 1;
+            if turns == 1 { return Ok(function(r#"{"method":"engine.commands","params_json":"{}"}"#)); }
+            let output: Value = serde_json::from_str(body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()).unwrap();
+            assert!(output["result"]["topics"].is_array());
+            assert!(body["input"].to_string().contains("keep its notes and name"));
+            Ok(message("I can discover the synth controls without changing your notes."))
+        },
+        |_, _| Ok(json!({"ok":true,"result":catalog})),
+    ).unwrap();
+    assert_eq!(turns, 2);
+    assert!(result.text.contains("synth controls"));
+}
+
+#[test]
 fn responses_round_trip_preserves_reasoning_call_ids_and_image_results() {
     let mut requests = Vec::new();
     let mut calls = 0;
@@ -73,6 +98,45 @@ fn responses_round_trip_preserves_reasoning_call_ids_and_image_results() {
     )
     .unwrap();
     assert_eq!(second.text, "Still here.");
+}
+
+#[test]
+fn repeated_full_discovery_is_redirected_without_refetching_the_catalog() {
+    let mut turn = 0;
+    let mut dispatches = 0;
+    run(
+        &host(),
+        DEFAULT_MODEL,
+        vec![],
+        &AtomicBool::new(false),
+        |body| {
+            turn += 1;
+            match turn {
+                1 | 2 => Ok(function(
+                    r#"{"method":"engine.commands","params_json":"{}"}"#,
+                )),
+                3 => {
+                    assert!(
+                        body["input"].as_array().unwrap().last().unwrap()["output"]
+                            .as_str()
+                            .unwrap()
+                            .contains("already discovered")
+                    );
+                    Ok(function(
+                        r#"{"method":"engine.commands","params_json":"{\"filter\":\"synth\"}"}"#,
+                    ))
+                }
+                _ => Ok(message("Use the filtered synth schemas.")),
+            }
+        },
+        |_, _| {
+            dispatches += 1;
+            Ok(json!({"ok":true,"result":[{"id":"synth.catalog","params":"{}"}]}))
+        },
+    )
+    .unwrap();
+    assert_eq!(dispatches, 2);
+    assert_eq!(turn, 4);
 }
 
 #[test]

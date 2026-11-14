@@ -151,6 +151,12 @@ the plugin requests a concise continuation summary (without tools) and replaces
 the model context only after a valid summary succeeds. The readable transcript
 stays separate. Summary requests use the selected model and count as API usage;
 failed compaction retains the full context for retry.
+Command discovery uses a small topic index and bounded filtered pages with complete
+parameter schemas. Repeat full-index calls in a turn are redirected to filters. Old
+saved catalogs are reduced locally before evaluating the summary threshold, while
+user requests, editing results and the readable transcript stay intact. Summary-only
+requests omit opaque editor reasoning and can retry output-token exhaustion once
+with a larger bounded budget; incomplete summaries never replace history.
 Opaque provider continuation state stays paired with its tool calls in local
 archives, as required by reasoning models; it is never rendered as chat text.
 When the model changes, tool facts become quoted historical context and the old

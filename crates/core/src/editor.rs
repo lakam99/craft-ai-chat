@@ -2,6 +2,7 @@
 use crate::{HostInfo, ToolCall, function};
 use serde::Deserialize;
 use serde_json::{Value, json};
+pub(crate) mod discovery;
 
 /// Opt in only when the adapter resolves discovered widget IDs to live screen geometry.
 pub fn with_guidance(mut info: HostInfo) -> HostInfo {
@@ -53,8 +54,8 @@ impl EditorTools {
         vec![
             function(
                 self.name,
-                "Discover and use the host's existing commands and UI tools. Inspect IDs and parameters before editing.",
-                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"A JSON object of parameters; {} when none are needed."}},"required":["method","params_json"],"additionalProperties":false}),
+                "Discover and use existing commands and UI tools. engine.commands {} returns a topic index; use {filter: topic or exact ID, offset?: integer, limit?: 1..32} for full parameter schemas. Reuse schemas already discovered instead of repeating catalogs. Run commands with engine.execute {command,params}.",
+                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"JSON object; {} when none needed. For engine.commands use filter (not query/search), then optional offset/limit to page results."}},"required":["method","params_json"],"additionalProperties":false}),
             ),
             function(
                 "video_frame",
@@ -85,11 +86,12 @@ impl EditorTools {
             if args.params_json.len() > 64 * 1024 {
                 return Err("Editor parameters exceed 64 KiB".into());
             }
-            let params: Value = serde_json::from_str(&args.params_json)
+            let mut params: Value = serde_json::from_str(&args.params_json)
                 .map_err(|_| "params_json must contain a valid JSON object")?;
             if !params.is_object() {
                 return Err("params_json must contain a JSON object".into());
             }
+            discovery::prepare(&args.method, &mut params)?;
             if targets_chat(&params, 0) {
                 return Err("AI chat controls and preferences are reserved for the user".into());
             }
