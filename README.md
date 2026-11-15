@@ -155,9 +155,11 @@ Command discovery uses a small topic index and bounded filtered pages with compl
 parameter schemas. Repeat full-index calls in a turn are redirected to filters.
 The assistant reuses known schemas across questions. Related topics or exact IDs
 can be fetched in one `engine.commands` query, for example
-`{"filters":["soundlab.inspect","soundlab.preview","synth.catalog"]}` (up to eight
+`{"filters":["soundlab.inspect","soundlab.preview","synth.catalog"],"exact":true}` (up to eight
 filters, with the existing bounded paging). Filtering also happens locally for
-hosts that return a complete catalog. Exact-ID queries reuse saved schemas;
+hosts that return a complete catalog. Use `"exact":true` to look up only specific
+command IDs and reuse saved schemas. Default substring searches still ask the
+editor for every match, including similarly named commands;
 `"refresh":true` explicitly refreshes a schema after a command/parameter error.
 The most recent 48 static command references, bounded to 24 KiB in total, survive
 successful compaction, model changes and normal history persistence. They are

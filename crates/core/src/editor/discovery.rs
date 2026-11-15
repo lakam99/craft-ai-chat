@@ -12,6 +12,7 @@ const MAX_COMMANDS: usize = 8192;
 struct Query {
     filter: String,
     filters: Vec<String>,
+    exact: bool,
     refresh: bool,
     offset: usize,
     limit: Option<usize>,
@@ -21,7 +22,7 @@ fn query(params: &Value) -> Result<Query, String> {
         return Err("Command discovery parameters must be a JSON object".into());
     }
     let mut q: Query = serde_json::from_value(params.clone())
-        .map_err(|_| "engine.commands expects {filter?: string OR filters?: [string], offset?: integer, limit?: integer, refresh?: bool}; use filter/filters, not search/query")?;
+        .map_err(|_| "engine.commands expects {filter?: string OR filters?: [string], exact?: bool, offset?: integer, limit?: integer, refresh?: bool}; use filter/filters, not search/query")?;
     if q.filter.len() > 256
         || q.offset > MAX_COMMANDS
         || q.limit.is_some_and(|n| !(1..=32).contains(&n))
@@ -30,6 +31,7 @@ fn query(params: &Value) -> Result<Query, String> {
             .iter()
             .any(|f| f.trim().is_empty() || f.len() > 256)
         || (!q.filter.trim().is_empty() && !q.filters.is_empty())
+        || (q.exact && q.filter.trim().is_empty() && q.filters.is_empty())
     {
         return Err(
             "Use filter OR up to 8 nonempty filters (<=256 bytes each), offset <=8192 and limit 1..32".into(),
@@ -65,6 +67,7 @@ pub(super) fn prepare(method: &str, params: &mut Value) -> Result<(), String> {
             params.remove("offset");
             params.remove("limit");
             params.remove("refresh");
+            params.remove("exact");
         }
     }
     Ok(())
@@ -120,6 +123,11 @@ pub(crate) fn compact(call: &ToolCall, result: Value) -> Result<Value, String> {
         .iter()
         .filter(|c| {
             filters.iter().any(|f| {
+                if q.exact {
+                    return c["id"]
+                        .as_str()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(f));
+                }
                 c["id"]
                     .as_str()
                     .unwrap_or_default()
@@ -186,7 +194,10 @@ pub(crate) fn compact(call: &ToolCall, result: Value) -> Result<Value, String> {
         };
         next_query["offset"] = json!(next);
         next_query["limit"] = json!(q.limit.unwrap_or(16));
-        json!({"filter":q.filter,"filters":q.filters,"total":commands.len(),"offset":q.offset,"commands":page,
+        if q.exact {
+            next_query["exact"] = json!(true);
+        }
+        json!({"filter":q.filter,"filters":q.filters,"exact":q.exact,"total":commands.len(),"offset":q.offset,"commands":page,
             "next":(next<commands.len()).then_some(next_query),
             "instructions":"Exact command parameters. Reuse these schemas across messages; do not rediscover them for every question. Use engine.execute {command,params}. Request next only if a required command is missing, not to enumerate the whole editor. enabled/why describe only the moment of discovery; inspect live state before editing."})
     };
@@ -223,7 +234,7 @@ pub(crate) fn reuse(call: &ToolCall, items: &[Value]) -> Result<Option<Value>, S
     let params: Value =
         serde_json::from_str(text).map_err(|_| "Invalid command discovery parameters")?;
     let q = query(&params)?;
-    Ok(if q.refresh {
+    Ok(if q.refresh || !q.exact {
         None
     } else {
         super::knowledge::cached(call, items)
@@ -291,13 +302,16 @@ mod tests {
             json!({"filters":["a","b","c","d","e","f","g","h","i"]}),
             json!({"filters":[42]}),
             json!({"refresh":"yes"}),
+            json!({"exact":true}),
+            json!({"filter":"synth","exact":"yes"}),
         ] {
             assert!(prepare("engine.commands", &mut params).is_err());
         }
         let mut params = json!({"filter":"soundlab","offset":16,"limit":8});
         prepare("engine.commands", &mut params).unwrap();
         assert_eq!(params, json!({"filter":"soundlab"}));
-        let mut params = json!({"filters":["soundlab.preview","synth.catalog"],"refresh":true});
+        let mut params =
+            json!({"filters":["soundlab.preview","synth.catalog"],"exact":true,"refresh":true});
         prepare("engine.commands", &mut params).unwrap();
         assert_eq!(params, json!({}));
     }
@@ -319,6 +333,29 @@ mod tests {
         assert_eq!(page["result"]["total"], 2);
         assert_eq!(page["result"]["commands"][1]["id"], "synth.catalog");
         assert!(page["result"]["next"].is_null());
+    }
+    #[test]
+    fn exact_id_mode_and_substring_search_have_distinct_results() {
+        let commands = json!([
+            {"id":"effect.apply","params":"{effect,layers}"},
+            {"id":"effect.applyLast","params":"{layers}"}
+        ]);
+        let broad = compact(&call(json!({"filter":"effect.apply"})), commands.clone()).unwrap();
+        assert_eq!(broad["total"], 2);
+        let exact = compact(
+            &call(json!({"filter":"effect.apply","exact":true})),
+            commands.clone(),
+        )
+        .unwrap();
+        assert_eq!(exact["total"], 1);
+        assert_eq!(exact["commands"][0]["id"], "effect.apply");
+        let page = compact(
+            &call(json!({"filters":["effect.apply","effect.applyLast"],"exact":true,"limit":1})),
+            commands,
+        )
+        .unwrap();
+        assert_eq!(page["next"]["exact"], true);
+        assert_eq!(page["next"]["offset"], 1);
     }
     #[test]
     fn errors_images_and_non_discovery_results_are_not_rewritten() {
