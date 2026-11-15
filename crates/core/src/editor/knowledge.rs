@@ -225,6 +225,9 @@ mod tests {
             .is_none()
         );
         assert!(cached(&call("soundcraft", json!({"filter":"soundlab"})), &items).is_none());
+        let mut extra = call("soundcraft", json!({"filter":"soundlab.preview"}));
+        extra.arguments["unexpected"] = json!(true);
+        assert!(super::super::discovery::reuse(&extra, &items).is_err());
         assert!(
             super::super::discovery::reuse(
                 &call(
