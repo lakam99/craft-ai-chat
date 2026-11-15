@@ -140,6 +140,46 @@ fn repeated_full_discovery_is_redirected_without_refetching_the_catalog() {
 }
 
 #[test]
+fn schemas_are_reused_across_saved_turns_and_can_be_explicitly_refreshed() {
+    let dispatches = std::cell::Cell::new(0);
+    let mut history = vec![json!({"role":"user","content":"Rename my tracks"})];
+    for refresh in [false, false, true] {
+        let mut turn = 0;
+        let mut got_cached = false;
+        let text = run_with_history(
+            &host(), DEFAULT_MODEL, &mut history, &AtomicBool::new(false),
+            |body| {
+                turn += 1;
+                if turn == 1 {
+                    assert!(body["instructions"].as_str().unwrap().contains("a new question does not require rediscovery"));
+                    return Ok(function(&json!({"method":"engine.commands","params_json":json!({"filters":["track.rename"],"refresh":refresh}).to_string()}).to_string()));
+                }
+                let output: Value = serde_json::from_str(body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["result"]["commands"][0]["params"], "{track,name}");
+                got_cached = output["result"]["cached"] == true;
+                Ok(message("Ready to reuse the rename command."))
+            },
+            |_, _| {
+                dispatches.set(dispatches.get()+1);
+                Ok(json!({"ok":true,"result":[{"id":"track.rename","params":"{track,name}","enabled":true}]}))
+            }, |_| Ok(()),
+        ).unwrap();
+        assert!(text.contains("reuse"));
+        if !refresh && dispatches.get() == 1 && history.len() > 5 {
+            assert!(got_cached);
+        }
+        // Existing archive serialization needs no new file format to retain this knowledge.
+        history = serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        history.push(json!({"role":"user","content":"Rename the next tracks too"}));
+    }
+    assert_eq!(
+        dispatches.get(),
+        2,
+        "First discovery and explicit refresh only"
+    );
+}
+
+#[test]
 fn malformed_arguments_return_tool_error_without_executing() {
     let mut n = 0;
     run(
