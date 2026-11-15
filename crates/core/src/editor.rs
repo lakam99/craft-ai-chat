@@ -55,8 +55,8 @@ impl EditorTools {
         vec![
             function(
                 self.name,
-                "Use known command schemas directly. Only for missing schemas, engine.commands accepts {filters:[up to 8 command IDs or topics],limit?:1..32} to discover a whole workflow in ONE call, or {filter: one substring}. {} returns a topic index, not parameters. Reuse schemas across messages; never browse every command. engine.execute {command,params} runs a command.",
-                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"JSON object; {} when none needed. engine.commands: filter OR filters (up to 8 topics/IDs), optional offset/limit, refresh:true after unknown ID/parameter errors. Prefer a single combined query for only missing schemas. Not query/search."}},"required":["method","params_json"],"additionalProperties":false}),
+                "Use known command schemas directly. Only for missing schemas, engine.commands accepts {filters:[up to 8 command IDs or topics],limit?:1..32} to discover a whole workflow in ONE call, or {filter: one substring}. Add exact:true only when looking up specific command IDs; this mode can reuse retained schemas. Default searches still include every substring match. {} returns a topic index, not parameters. Reuse schemas across messages; never browse every command. engine.execute {command,params} runs a command.",
+                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"JSON object; {} when none needed. engine.commands: filter OR filters (up to 8 topics/IDs), optional exact:true for specific IDs, offset/limit, refresh:true after unknown ID/parameter errors. Prefer a single combined query for only missing schemas. Not query/search."}},"required":["method","params_json"],"additionalProperties":false}),
             ),
             function(
                 "video_frame",

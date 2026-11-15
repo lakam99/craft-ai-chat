@@ -152,7 +152,7 @@ fn schemas_are_reused_across_saved_turns_and_can_be_explicitly_refreshed() {
                 turn += 1;
                 if turn == 1 {
                     assert!(body["instructions"].as_str().unwrap().contains("a new question does not require rediscovery"));
-                    return Ok(function(&json!({"method":"engine.commands","params_json":json!({"filters":["track.rename"],"refresh":refresh}).to_string()}).to_string()));
+                    return Ok(function(&json!({"method":"engine.commands","params_json":json!({"filters":["track.rename"],"exact":true,"refresh":refresh}).to_string()}).to_string()));
                 }
                 let output: Value = serde_json::from_str(body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()).unwrap();
                 assert_eq!(output["result"]["commands"][0]["params"], "{track,name}");

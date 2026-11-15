@@ -198,7 +198,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&items).unwrap()).unwrap();
         let call = crate::ToolCall::new(
             "soundcraft",
-            json!({"method":"engine.commands","params_json":"{\"filter\":\"soundlab.preview\"}"}),
+            json!({"method":"engine.commands","params_json":"{\"filter\":\"soundlab.preview\",\"exact\":true}"}),
         );
         let cached = crate::editor::discovery::reuse(&call, &reloaded)
             .unwrap()

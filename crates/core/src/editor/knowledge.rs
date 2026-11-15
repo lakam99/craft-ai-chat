@@ -126,6 +126,9 @@ pub(crate) fn cached(call: &ToolCall, items: &[Value]) -> Option<Value> {
         return None;
     }
     let params: Value = serde_json::from_str(call.arguments["params_json"].as_str()?).ok()?;
+    if params["exact"] != true {
+        return None;
+    }
     if params.get("offset").is_some_and(|v| v != 0) {
         return None;
     }
@@ -158,7 +161,7 @@ pub(crate) fn cached(call: &ToolCall, items: &[Value]) -> Option<Value> {
         return None;
     }
     Some(
-        json!({"ok":true,"result":{"cached":true,"commands":commands,"next":null,"instructions":"Reused exact schemas. Current enabled state is not cached; inspect the document before editing. Do not rediscover these commands."}}),
+        json!({"ok":true,"result":{"cached":true,"exact":true,"commands":commands,"next":null,"instructions":"Reused exact schemas. Current enabled state is not cached; inspect the document before editing. Do not rediscover these commands."}}),
     )
 }
 
@@ -184,6 +187,28 @@ pub(crate) fn preserve_on_model_change(items: &mut Vec<Value>, part: Option<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn substring_searches_do_not_reuse_an_incomplete_exact_reference() {
+        let mut known = Knowledge::default();
+        known.learn(
+            "effectcraft",
+            &json!({"id":"effect.apply","params":"{effect,layers}"}),
+        );
+        let items = vec![
+            json!({"role":"user","content":[{"type":"input_text","text":format!("{PREFIX}{}",json!(known.0))}]}),
+        ];
+        // EffectCraft also has effect.applyLast. A remembered effect.apply schema is not
+        // proof that no other command matches the ordinary substring query.
+        let call = ToolCall::new(
+            "effectcraft",
+            json!({"method":"engine.commands","params_json":"{\"filter\":\"effect.apply\"}"}),
+        );
+        assert!(
+            super::super::discovery::reuse(&call, &items)
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn retained_schemas_are_bounded_and_do_not_cache_live_availability() {
         let mut known = Knowledge::default();
@@ -211,7 +236,8 @@ mod tests {
         );
         let part = json!({"type":"input_text","text":format!("{PREFIX}{}",json!(known.0))});
         let items = vec![json!({"role":"user","content":[part]})];
-        let call = |editor: &str, params: Value| {
+        let call = |editor: &str, mut params: Value| {
+            params["exact"] = json!(true);
             ToolCall::new(
                 editor,
                 json!({"method":"engine.commands","params_json":params.to_string()}),
