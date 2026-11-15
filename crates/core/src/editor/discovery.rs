@@ -207,6 +207,15 @@ pub(crate) fn reuse(call: &ToolCall, items: &[Value]) -> Result<Option<Value>, S
     if call.arguments["method"] != "engine.commands" {
         return Ok(None);
     }
+    // A cached answer must validate the same envelope as EditorTools::parse; otherwise
+    // an extra or mistyped argument would be accepted only after the first discovery.
+    if !call
+        .arguments
+        .as_object()
+        .is_some_and(|args| args.len() == 2 && args.contains_key("params_json"))
+    {
+        return Err("Expected only method and params_json strings".into());
+    }
     let text = call.arguments["params_json"]
         .as_str()
         .filter(|s| s.len() <= 64 * 1024)
