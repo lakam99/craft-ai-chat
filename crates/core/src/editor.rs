@@ -3,6 +3,7 @@ use crate::{HostInfo, ToolCall, function};
 use serde::Deserialize;
 use serde_json::{Value, json};
 pub(crate) mod discovery;
+pub(crate) mod knowledge;
 
 /// Opt in only when the adapter resolves discovered widget IDs to live screen geometry.
 pub fn with_guidance(mut info: HostInfo) -> HostInfo {
@@ -54,8 +55,8 @@ impl EditorTools {
         vec![
             function(
                 self.name,
-                "Discover and use existing commands and UI tools. engine.commands {} returns a topic index; use {filter: topic or exact ID, offset?: integer, limit?: 1..32} for full parameter schemas. Reuse schemas already discovered instead of repeating catalogs. Run commands with engine.execute {command,params}.",
-                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"JSON object; {} when none needed. For engine.commands use filter (not query/search), then optional offset/limit to page results."}},"required":["method","params_json"],"additionalProperties":false}),
+                "Use known command schemas directly. Only for missing schemas, engine.commands accepts {filters:[up to 8 command IDs or topics],limit?:1..32} to discover a whole workflow in ONE call, or {filter: one substring}. {} returns a topic index, not parameters. Reuse schemas across messages; never browse every command. engine.execute {command,params} runs a command.",
+                json!({"type":"object","properties":{"method":{"type":"string","enum":self.methods},"params_json":{"type":"string","description":"JSON object; {} when none needed. engine.commands: filter OR filters (up to 8 topics/IDs), optional offset/limit, refresh:true after unknown ID/parameter errors. Prefer a single combined query for only missing schemas. Not query/search."}},"required":["method","params_json"],"additionalProperties":false}),
             ),
             function(
                 "video_frame",

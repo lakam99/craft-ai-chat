@@ -152,8 +152,18 @@ the model context only after a valid summary succeeds. The readable transcript
 stays separate. Summary requests use the selected model and count as API usage;
 failed compaction retains the full context for retry.
 Command discovery uses a small topic index and bounded filtered pages with complete
-parameter schemas. Repeat full-index calls in a turn are redirected to filters. Old
-saved catalogs are reduced locally before evaluating the summary threshold, while
+parameter schemas. Repeat full-index calls in a turn are redirected to filters.
+The assistant reuses known schemas across questions. Related topics or exact IDs
+can be fetched in one `engine.commands` query, for example
+`{"filters":["soundlab.inspect","soundlab.preview","synth.catalog"]}` (up to eight
+filters, with the existing bounded paging). Filtering also happens locally for
+hosts that return a complete catalog. Exact-ID queries reuse saved schemas;
+`"refresh":true` explicitly refreshes a schema after a command/parameter error.
+The most recent 48 static command references, bounded to 24 KiB in total, survive
+successful compaction, model changes and normal history persistence. They are
+untrusted reference data: enabled state, selection, object IDs and permission to
+edit are never cached. The assistant must still inspect the live document.
+Old saved catalogs are reduced locally before evaluating the summary threshold, while
 user requests, editing results and the readable transcript stay intact. Summary-only
 requests omit opaque editor reasoning and can retry output-token exhaustion once
 with a larger bounded budget; incomplete summaries never replace history.
