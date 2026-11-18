@@ -120,7 +120,13 @@ impl<T> Panel<T> {
             } else {
                 !matches!(
                     item["type"].as_str(),
-                    Some("function_call" | "function_call_output" | "reasoning" | "compaction")
+                    Some(
+                        "function_call"
+                            | "function_call_output"
+                            | "reasoning"
+                            | "compaction"
+                            | core::tool_results::RECORD_TYPE
+                    )
                 )
             }
         }) {
@@ -148,10 +154,26 @@ impl<T> Panel<T> {
         // Responses requires reasoning items alongside their function calls/outputs.
         // Keep the opaque provider state intact; it is never rendered as chat text.
         let mut value = json!({"version":1,"model":self.history_model,"history":history,"transcript":self.chat.transcript});
-        if core::bounds::value_size(&value, craft_ai_chat_native::history::MAX_ARCHIVE).is_err() {
-            self.archive.message =
-                "Chat history is too large to save; compact it by sending a follow-up".into();
-            return;
+        while core::bounds::value_size(&value, craft_ai_chat_native::history::MAX_ARCHIVE).is_err()
+        {
+            // Reproducible observations must never prevent saving the user's conversation.
+            // Expired detail references report their expiry after reopening.
+            let evicted = value["history"].as_array_mut().is_some_and(|history| {
+                if let Some(index) = history
+                    .iter()
+                    .position(|item| item["type"] == core::tool_results::RECORD_TYPE)
+                {
+                    history.remove(index);
+                    true
+                } else {
+                    false
+                }
+            });
+            if !evicted {
+                self.archive.message =
+                    "Chat history is too large to save; compact it by sending a follow-up".into();
+                return;
+            }
         }
         // A key pasted into chat must not escape into this archive either.
         if !self.key.is_empty() {
@@ -173,5 +195,21 @@ fn redact(value: &mut Value, key: &str) {
             Value::Object(o) => stack.extend(o.values_mut()),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_observation_records_restore_without_becoming_chat_bubbles() {
+        let mut panel = Panel::<()>::default();
+        panel.restore_archive(json!({"version":1,"model":"model","history":[
+            {"role":"user","content":"Continue the document operation"},
+            {"type":core::tool_results::RECORD_TYPE,"call_id":"observed","result":{"entities":[{"id":42}]}}
+        ],"transcript":[["You","Continue the document operation"]]})).unwrap();
+        assert_eq!(panel.history.len(), 2);
+        assert_eq!(panel.transcript().len(), 1);
+        assert_eq!(panel.history[1]["result"]["entities"][0]["id"], 42);
     }
 }
