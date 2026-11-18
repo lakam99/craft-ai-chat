@@ -146,11 +146,30 @@ versions cannot be recovered after their context was already discarded.
 Tool-limit, network and worker failures preserve the original request and completed
 tool results, so **continue** retains the task. Unanswered calls are explicitly
 marked interrupted; current editor state must be inspected before retrying.
-Older attachments are omitted from subsequent turns. At 96 KiB or 128 items,
+Older attachments are omitted from subsequent turns. Large inspection results become
+small structural previews instead of repeatedly forcing a summary. Up to eight raw
+observations, bounded to 4 MiB total, stay in the local history cache; they are excluded
+from provider and summary requests. `read_tool_result` retrieves exact fields and pages
+using the preview's call ID and JSON Pointer paths, with up to eight queries per call.
+The cache follows the existing remember-history preference and project scope; evicted
+observations explicitly report expiry. Snapshots are historical observations, not
+authorization or confirmation that an edit succeeded.
+
+At 96 KiB of model context or 128 model-visible items,
 the plugin requests a concise continuation summary (without tools) and replaces
 the model context only after a valid summary succeeds. The readable transcript
 stays separate. Summary requests use the selected model and count as API usage;
-failed compaction retains the full context for retry.
+failed compaction retains the full context for retry. Recent observations and exact
+detail references survive successful compaction, so the assistant can continue the
+current workflow without restarting inspections. Changed revisions, edits and user
+interaction still require fresh state where needed.
+
+Repeated unchanged inspection/discovery results or identical errors trigger a recovery
+instruction. If the assistant repeats the same observations again, the next request
+disables tools and asks it to explain completed work and the blocker. Successful
+mutations are never deduplicated, and pending job polls are excluded. The 32-call
+backstop remains; it also permits a final explanation instead of requiring a blind
+"continue" message.
 Command discovery uses a small topic index and bounded filtered pages with complete
 parameter schemas. Repeat full-index calls in a turn are redirected to filters.
 The assistant reuses known schemas across questions. Related topics or exact IDs
@@ -164,7 +183,8 @@ editor for every match, including similarly named commands;
 The most recent 48 static command references, bounded to 24 KiB in total, survive
 successful compaction, model changes and normal history persistence. They are
 untrusted reference data: enabled state, selection, object IDs and permission to
-edit are never cached. The assistant must still inspect the live document.
+edit are not part of the static schema cache. Live observations are separate, bounded
+snapshots; the assistant must check state again after relevant changes.
 Old saved catalogs are reduced locally before evaluating the summary threshold, while
 user requests, editing results and the readable transcript stay intact. Summary-only
 requests omit opaque editor reasoning and can retry output-token exhaustion once

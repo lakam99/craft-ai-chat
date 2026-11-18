@@ -132,6 +132,7 @@ impl EditorTools {
             attachment_label: attachment_label.into(),
             welcome: format!("Ask about your work, request edits, or use {name}'s tools."),
         };
+        let info = crate::tool_results::with_reader(info);
         if self.methods.contains(&"engine.execute") {
             crate::batch::with_batches(info, self.name)
         } else {

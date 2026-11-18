@@ -13,6 +13,7 @@ pub mod bounds;
 pub mod editor;
 pub mod history;
 pub mod protocol;
+pub mod tool_results;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

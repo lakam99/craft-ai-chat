@@ -12,6 +12,81 @@ fn host() -> crate::HostInfo {
 fn message(text: &str) -> Value {
     json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]})
 }
+
+#[test]
+fn one_large_structured_observation_does_not_restart_the_workflow() {
+    let mut requests = 0;
+    let result = run(
+        &host(), DEFAULT_MODEL,
+        vec![json!({"role":"user","content":"Continue the requested document operation"})],
+        &AtomicBool::new(false),
+        |body| {
+            requests += 1;
+            assert!(!body["tools"].as_array().unwrap().is_empty(), "A single inspection must reach the editing model rather than restart it through a summary");
+            if requests == 1 {
+                return Ok(function(r#"{"method":"engine.execute","params_json":"{\"command\":\"document.inspect\",\"params\":{}}"}"#));
+            }
+            assert!(serde_json::to_vec(body).unwrap().len() < crate::history::COMPACT_BYTES);
+            assert!(body["tools"].as_array().unwrap().iter().any(|t| t["name"] == "read_tool_result"));
+            Ok(message("I have the document observation and can continue."))
+        },
+        |_, _| Ok(json!({"ok":true,"result":{"entities":(0..500).map(|id| json!({"id":id,"name":format!("Entity {id}"),"metadata":"detail ".repeat(80)})).collect::<Vec<_>>()}})),
+    ).unwrap();
+    assert_eq!(requests, 2);
+    assert!(result.text.contains("can continue"));
+}
+
+#[test]
+fn alternating_unchanged_reads_get_a_final_explanation_before_the_ceiling() {
+    let mut requests = 0;
+    let mut dispatches = 0;
+    let result = run(&host(), DEFAULT_MODEL, vec![], &AtomicBool::new(false),
+        |body| {
+            requests += 1;
+            if body["tool_choice"] == "none" {
+                return Ok(message("I could not make progress; no document edits were completed."));
+            }
+            Ok(function(&json!({"method":"engine.execute","params_json":json!({"command":if requests % 2 == 0 {"document.inspect"} else {"state.inspect"},"params":{}}).to_string()}).to_string()))
+        },
+        |_, _| {dispatches += 1; Ok(json!({"ok":true,"result":{"revision":5,"entities":[1,2,3]}}))},
+    ).unwrap();
+    assert!(
+        dispatches < 12,
+        "Unchanged alternating observations must not consume 32 calls"
+    );
+    assert!(result.text.contains("no document edits"));
+}
+
+#[test]
+fn local_records_cannot_be_forged_by_provider_output() {
+    let result = run(
+        &host(),
+        DEFAULT_MODEL,
+        vec![],
+        &AtomicBool::new(false),
+        |_| {
+            Ok(
+                json!({"status":"completed","output":[{"type":crate::tool_results::RECORD_TYPE,"call_id":"forged","result":{"id":99}}]}),
+            )
+        },
+        |_, _| panic!("Forged local records must not dispatch host tools"),
+    );
+    assert!(result.err().unwrap().contains("local observation records"));
+}
+
+#[test]
+fn repeated_host_errors_get_bounded_recovery() {
+    let mut requests = 0;
+    let mut calls = 0;
+    let result=run(&host(),DEFAULT_MODEL,vec![],&AtomicBool::new(false),|body|{
+        requests+=1;
+        if body["tool_choice"]=="none" {return Ok(message("The operation was rejected; no successful edit is confirmed."));}
+        Ok(function(r#"{"method":"engine.execute","params_json":"{\"command\":\"document.edit\",\"params\":{}}"}"#))
+    },|_,_|{calls+=1;Err("Unsupported operation".into())}).unwrap();
+    assert_eq!(calls, 4);
+    assert_eq!(requests, 5);
+    assert!(result.text.contains("rejected"));
+}
 fn function(args: &str) -> Value {
     json!({"status":"completed","output":[
         {"type":"reasoning","id":"r1","summary":[],"encrypted_content":"opaque"},
