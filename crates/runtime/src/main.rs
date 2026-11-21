@@ -45,6 +45,7 @@ fn main() -> std::process::ExitCode {
                 &Output::Ready {
                     protocol: runtime::PROTOCOL,
                     version: env!("CARGO_PKG_VERSION").into(),
+                    capabilities: vec![runtime::SEND_RECEIPTS.into()],
                 },
             )
         }

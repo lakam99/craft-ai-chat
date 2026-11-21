@@ -7,6 +7,12 @@ use std::io::{BufRead, Write};
 pub const PROTOCOL: u32 = 1;
 pub const MAX_PACKET: usize = 20 * 1024 * 1024;
 pub const MAX_VIEW: usize = 4 * 1024 * 1024;
+pub const SEND_RECEIPTS: &str = "send-receipts";
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Receipt {
+    pub serial: u64,
+    pub accepted: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -47,6 +53,8 @@ pub enum Input {
         snapshot: Snapshot,
     },
     Action {
+        #[serde(default)]
+        serial: u64,
         snapshot: Snapshot,
         id: String,
         value: Value,
@@ -67,11 +75,15 @@ pub enum Output {
     Ready {
         protocol: u32,
         version: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     View {
         epoch: u64,
         view: View,
         status: Value,
+        #[serde(default)]
+        submitted: Option<Receipt>,
     },
     Tool {
         epoch: u64,

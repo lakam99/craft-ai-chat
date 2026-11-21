@@ -120,6 +120,8 @@ pub struct Panel<T> {
     attempted: Vec<PathBuf>,
     requested: bool,
     source_mode: bool,
+    next_action: u64,
+    sending: Option<(u64, String)>,
 }
 impl<T> Default for Panel<T> {
     fn default() -> Self {
@@ -143,6 +145,8 @@ impl<T> Default for Panel<T> {
             attempted: Vec::new(),
             requested: false,
             source_mode: false,
+            next_action: 0,
+            sending: None,
         }
     }
 }
@@ -158,6 +162,16 @@ impl<T> DerefMut for Panel<T> {
     }
 }
 impl<T> Panel<T> {
+    fn receipt(&mut self, receipt: runtime::Receipt) {
+        if let Some((serial, draft)) = &self.sending
+            && *serial == receipt.serial
+        {
+            if receipt.accepted && &self.local.prompt == draft {
+                self.local.prompt.clear();
+            }
+            self.sending = None;
+        }
+    }
     fn choose_component(&mut self, paths: Vec<PathBuf>) -> Option<PathBuf> {
         if self.source_mode {
             return None;
@@ -180,6 +194,7 @@ impl<T> Panel<T> {
             self.instance = Some(instance);
             self.tools.clear();
             self.guide = None;
+            self.sending = None;
             self.local.guidance.clear();
             self.view = None;
             self.status = Value::Null;
@@ -202,7 +217,7 @@ impl<T> Panel<T> {
         host: &H,
         id: &str,
         value: Value,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let snapshot = self.snapshot(host);
         snapshot.validate()?;
         let connection = self
@@ -212,17 +227,24 @@ impl<T> Panel<T> {
         if !connection.ready {
             return Err("Chat component is starting; try again in a moment".into());
         }
+        self.next_action = self
+            .next_action
+            .checked_add(1)
+            .ok_or("Chat action IDs exhausted")?;
         connection.send(Input::Action {
+            serial: self.next_action,
             snapshot,
             id: id.into(),
             value,
-        })
+        })?;
+        Ok(self.next_action)
     }
     pub fn busy(&self) -> bool {
-        self.connection.as_ref().map_or_else(
-            || self.local.busy(),
-            |_| self.status["busy"].as_bool().unwrap_or(true),
-        )
+        self.sending.is_some()
+            || self.connection.as_ref().map_or_else(
+                || self.local.busy(),
+                |_| self.status["busy"].as_bool().unwrap_or(true),
+            )
     }
     pub fn fail(&mut self, error: &str) {
         if let Some(connection) = &self.connection {
@@ -280,6 +302,7 @@ impl<T> Panel<T> {
         }
         if id == "ai.status" {
             let mut status = self.status.clone();
+            status["busy"] = json!(self.busy());
             status["highlights"] = self.local.guidance.status();
             status["walkthrough"] = self.local.guidance.walkthrough_status();
             status["componentVersion"] =
@@ -300,6 +323,9 @@ impl<T> Panel<T> {
                 | "ai.clearHighlights"
         ) {
             return None;
+        }
+        if id == "ai.send" && self.sending.is_some() {
+            return Some(Ok(json!({"pending":true})));
         }
         if matches!(id, "ai.stop" | "ai.clearHighlights") {
             self.local.dismiss_guidance();
@@ -324,12 +350,12 @@ impl<T> Panel<T> {
         } else {
             Value::Null
         };
-        let result = self
-            .action(host, id, value)
-            .map(|()| json!({"pending":true}));
-        if result.is_ok() && id == "ai.send" {
-            self.local.prompt.clear();
-        }
+        let result = self.action(host, id, value).map(|serial| {
+            if id == "ai.send" {
+                self.sending = Some((serial, self.local.prompt.clone()));
+            }
+            json!({"pending":true})
+        });
         if id == "ai.forgetKey" {
             self.fields.remove("ai.key");
             super::clear_key_undo(ctx);
@@ -390,8 +416,14 @@ impl<T> Panel<T> {
                     error = Some(e);
                     break;
                 }
-                Ok(Output::Ready { protocol, version }) => {
-                    if protocol != runtime::PROTOCOL {
+                Ok(Output::Ready {
+                    protocol,
+                    version,
+                    capabilities,
+                }) => {
+                    if protocol != runtime::PROTOCOL
+                        || !capabilities.iter().any(|v| v == runtime::SEND_RECEIPTS)
+                    {
                         error = Some(
                             "Chat component is incompatible. The bundled chat remains available."
                                 .into(),
@@ -408,6 +440,7 @@ impl<T> Panel<T> {
                     epoch,
                     view,
                     status,
+                    submitted,
                 }) if epoch == self.epoch => {
                     if !status.is_object()
                         || crate::core::bounds::value_size(&status, runtime::MAX_VIEW).is_err()
@@ -418,6 +451,9 @@ impl<T> Panel<T> {
                     if let Err(e) = view.validate() {
                         error = Some(e);
                         break;
+                    }
+                    if let Some(receipt) = submitted {
+                        self.receipt(receipt);
                     }
                     self.view = Some(view);
                     self.status = status;
@@ -599,12 +635,17 @@ impl<T> Panel<T> {
                 .show(host, ui, ui.available_rect_before_wrap().intersect(rect));
             return;
         }
-        let Some(view) = self.view.clone() else {
+        let Some(view) = self.view.take() else {
             ui.spinner();
             ui.label("Starting chat component…");
             return;
         };
+        let epoch = self.epoch;
         self.show_view(host, ui, &view);
+        // Rendering may poll a newer view or switch documents while dispatching an action.
+        if self.view.is_none() && self.epoch == epoch {
+            self.view = Some(view);
+        }
     }
     fn show_view<H: Host<Tool = T>>(&mut self, host: &mut H, ui: &mut egui::Ui, view: &View) {
         let mut actions = Vec::new();
@@ -643,9 +684,9 @@ impl<T> Panel<T> {
             self.local.credentials_ui(host, ui, true);
             return;
         }
-        if let Some(view) = self.view.clone() {
+        if let Some(settings) = self.view.as_ref().map(|v| v.settings.clone()) {
             let mut actions = vec![];
-            self.render(host, ui, &view.settings, &mut actions);
+            self.render(host, ui, &settings, &mut actions);
             self.actions(host, ui.ctx(), actions);
         }
     }
@@ -658,8 +699,12 @@ impl<T> Panel<T> {
         for (id, value) in actions {
             let result = if id == "ai.prompt" {
                 Ok(())
-            } else if id == "ai.key" || id == "ai.attach" {
-                self.action(host, &id, value)
+            } else if id == "ai.attach" {
+                // Apply a context opt-out before a Send in this same UI pass. A round trip
+                // through the component could otherwise send the old attachment preference.
+                host.set_preference("ai.attachFrames", value)
+            } else if id == "ai.key" {
+                self.action(host, &id, value).map(|_| ())
             } else {
                 self.command(host, ctx, &id)
                     .unwrap_or_else(|| Err("Unknown chat action".into()))
@@ -837,6 +882,37 @@ fn ctx_wake(ctx: &egui::Context) -> craft_ai_chat_native::Wake {
 mod tests {
     use super::*;
     #[test]
+    fn rejected_or_stale_send_receipts_never_erase_a_draft() {
+        let mut panel = Panel::<()>::default();
+        panel.local.prompt = "Keep this instruction".into();
+        panel.sending = Some((7, panel.local.prompt.clone()));
+        panel.receipt(runtime::Receipt {
+            serial: 6,
+            accepted: true,
+        });
+        assert_eq!(panel.local.prompt, "Keep this instruction");
+        assert!(panel.sending.is_some());
+        panel.receipt(runtime::Receipt {
+            serial: 7,
+            accepted: false,
+        });
+        assert_eq!(panel.local.prompt, "Keep this instruction");
+        assert!(panel.sending.is_none());
+        panel.sending = Some((8, panel.local.prompt.clone()));
+        panel.local.prompt = "A newer draft".into();
+        panel.receipt(runtime::Receipt {
+            serial: 8,
+            accepted: true,
+        });
+        assert_eq!(panel.local.prompt, "A newer draft");
+        panel.sending = Some((9, panel.local.prompt.clone()));
+        panel.receipt(runtime::Receipt {
+            serial: 9,
+            accepted: true,
+        });
+        assert!(panel.local.prompt.is_empty());
+    }
+    #[test]
     fn installing_a_component_does_not_switch_an_existing_source_conversation() {
         let mut panel = Panel::<()>::default();
         assert!(panel.choose_component(vec![]).is_none());
@@ -853,6 +929,7 @@ mod tests {
     }
     struct TestHost {
         info: crate::HostInfo,
+        preferences: crate::Preferences,
         instance: Arc<()>,
         rects: BTreeMap<String, egui::Rect>,
     }
@@ -865,7 +942,7 @@ mod tests {
             self.instance.clone()
         }
         fn preferences(&self) -> crate::Preferences {
-            crate::Preferences::default()
+            self.preferences.clone()
         }
         fn start_tool(&mut self, _: &crate::ToolCall) -> Result<(), String> {
             Err("Unexpected edit".into())
@@ -873,7 +950,10 @@ mod tests {
         fn poll_tool(&mut self, _: &mut ()) -> Result<Option<Value>, String> {
             Err("Unexpected edit".into())
         }
-        fn set_preference(&mut self, _: &str, _: Value) -> Result<(), String> {
+        fn set_preference(&mut self, key: &str, value: Value) -> Result<(), String> {
+            if key == "ai.attachFrames" {
+                self.preferences.attach_frames = value.as_bool().ok_or("Expected a boolean")?;
+            }
             Ok(())
         }
         fn open_preferences(&mut self) -> Result<(), String> {
@@ -887,8 +967,30 @@ mod tests {
         }
     }
     #[test]
+    fn attachment_opt_out_reaches_editor_preferences_before_the_next_action() {
+        let mut host = TestHost {
+            info: crate::core::editor::EditorTools {
+                name: "test",
+                methods: &["engine.commands"],
+                views: &[],
+            }
+            .host_info("test", "Test", "test", "Attach"),
+            preferences: Default::default(),
+            instance: Arc::new(()),
+            rects: BTreeMap::new(),
+        };
+        assert!(host.preferences().attach_frames);
+        Panel::<()>::default().actions(
+            &mut host,
+            &egui::Context::default(),
+            vec![("ai.attach".into(), json!(false))],
+        );
+        assert!(!host.preferences().attach_frames);
+    }
+    #[test]
     fn native_component_layout_keeps_composer_visible_and_formats_markdown() {
         let host = TestHost {
+            preferences: Default::default(),
             info: crate::core::editor::EditorTools {
                 name: "test",
                 methods: &["engine.commands"],

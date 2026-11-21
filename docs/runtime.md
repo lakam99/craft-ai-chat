@@ -16,6 +16,9 @@ The editor starts the component lazily with `--stdio-v1`, using private inherite
 stdin/stdout pipes. There is no listener or public port. Protocol version 1 uses
 bounded JSON frames for host snapshots, actions, views and tool replies. This is
 an internal transport: tool payloads are never displayed as chat messages.
+The handshake advertises `send-receipts`. Action serials and send receipts ensure
+the editor clears a draft only after the service accepts it. Older editors can
+ignore these additive fields; this bridge requires the capability before use.
 
 The service owns conversation logic, archives, secure credential access and a
 declarative view tree. The editor renders the tree using native egui controls:
