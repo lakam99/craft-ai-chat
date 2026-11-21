@@ -8,6 +8,7 @@ pub const PROTOCOL: u32 = 1;
 pub const MAX_PACKET: usize = 20 * 1024 * 1024;
 pub const MAX_VIEW: usize = 4 * 1024 * 1024;
 pub const SEND_RECEIPTS: &str = "send-receipts";
+pub const COMPONENT_ACTIONS: &str = "component-actions";
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Receipt {
     pub serial: u64,
@@ -28,9 +29,14 @@ pub struct Snapshot {
     pub document: Option<String>,
     pub profile: Option<Profile>,
     pub open: bool,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 impl Snapshot {
     pub fn validate(&self) -> Result<(), String> {
+        if self.capabilities.len() > 16 || self.capabilities.iter().any(|v| v.len() > 64) {
+            return Err("Invalid host bridge capabilities".into());
+        }
         if self.protocol != PROTOCOL {
             return Err("This chat component needs a different editor bridge version".into());
         }
@@ -165,6 +171,14 @@ impl View {
                 return Err("Chat layout nesting is too deep".into());
             }
             for node in nodes {
+                if let Node::Button { id, .. } | Node::Input { id, .. } | Node::Toggle { id, .. } =
+                    node
+                    && (!id.starts_with("ai.")
+                        || id.len() > 256
+                        || id.chars().any(char::is_control))
+                {
+                    return Err("Interactive chat widgets must use bounded ai.* IDs".into());
+                }
                 *count = count.saturating_add(1);
                 if *count > 4096 {
                     return Err("Chat layout is too large".into());

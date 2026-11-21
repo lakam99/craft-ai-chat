@@ -13,7 +13,7 @@ use std::{
 };
 
 struct Connection {
-    child: Child,
+    child: Option<Child>,
     send: mpsc::SyncSender<Input>,
     receive: mpsc::Receiver<Result<Output, String>>,
     ready: bool,
@@ -22,17 +22,20 @@ struct Connection {
 }
 impl Drop for Connection {
     fn drop(&mut self) {
+        let Some(child) = &mut self.child else {
+            return;
+        };
         // A stopped/crashed component must never keep a host editor alive.
         let _ = self.send.try_send(Input::Shutdown);
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
-            if !matches!(self.child.try_wait(), Ok(None)) {
+            if !matches!(child.try_wait(), Ok(None)) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 impl Connection {
@@ -84,7 +87,7 @@ impl Connection {
             let _=std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
         }).map_err(|e|format!("Cannot start chat pipe reader: {e}"))?;
         Ok(Self {
-            child,
+            child: Some(child),
             send,
             receive,
             ready: false,
@@ -120,6 +123,7 @@ pub struct Panel<T> {
     attempted: Vec<PathBuf>,
     requested: bool,
     source_mode: bool,
+    deferred: std::collections::VecDeque<Output>,
     next_action: u64,
     sending: Option<(u64, String)>,
 }
@@ -145,6 +149,7 @@ impl<T> Default for Panel<T> {
             attempted: Vec::new(),
             requested: false,
             source_mode: false,
+            deferred: std::collections::VecDeque::new(),
             next_action: 0,
             sending: None,
         }
@@ -162,6 +167,24 @@ impl<T> DerefMut for Panel<T> {
     }
 }
 impl<T> Panel<T> {
+    fn retain_fields(&mut self, view: &View) {
+        fn visit(nodes: &[Node], ids: &mut std::collections::BTreeSet<String>) {
+            for node in nodes {
+                match node {
+                    Node::Input { id, .. } => {
+                        ids.insert(id.clone());
+                    }
+                    Node::Row { children } | Node::Card { children, .. } => visit(children, ids),
+                    _ => {}
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for nodes in [&view.top, &view.body, &view.bottom, &view.settings] {
+            visit(nodes, &mut ids);
+        }
+        self.fields.retain(|id, _| ids.contains(id));
+    }
     fn receipt(&mut self, receipt: runtime::Receipt) {
         if let Some((serial, draft)) = &self.sending
             && *serial == receipt.serial
@@ -193,6 +216,7 @@ impl<T> Panel<T> {
             self.epoch = self.epoch.saturating_add(1);
             self.instance = Some(instance);
             self.tools.clear();
+            self.deferred.clear();
             self.guide = None;
             self.sending = None;
             self.local.guidance.clear();
@@ -210,6 +234,7 @@ impl<T> Panel<T> {
                 service: p.service,
             }),
             open: host.chat_is_open(),
+            capabilities: vec![runtime::COMPONENT_ACTIONS.into()],
         }
     }
     fn action<H: Host<Tool = T>>(
@@ -340,6 +365,7 @@ impl<T> Panel<T> {
             }
             if id == "ai.stop" {
                 self.tools.clear();
+                self.deferred.clear();
             }
         }
         if id == "ai.send" {
@@ -404,10 +430,16 @@ impl<T> Panel<T> {
         }
         let mut error = None;
         for _ in 0..16 {
-            let packet = self
-                .connection
-                .as_ref()
-                .and_then(|c| c.receive.try_recv().ok());
+            let waiting = if self.sending.is_none() {
+                self.deferred.pop_front().map(Ok)
+            } else {
+                None
+            };
+            let packet = waiting.or_else(|| {
+                self.connection
+                    .as_ref()
+                    .and_then(|c| c.receive.try_recv().ok())
+            });
             let Some(packet) = packet else {
                 break;
             };
@@ -455,11 +487,22 @@ impl<T> Panel<T> {
                     if let Some(receipt) = submitted {
                         self.receipt(receipt);
                     }
+                    self.retain_fields(&view);
                     self.view = Some(view);
                     self.status = status;
                     self.markdown.clear_viewers();
                 }
                 Ok(Output::Tool { epoch, id, call }) => {
+                    // A lost Send acknowledgment must leave a retryable draft without
+                    // allowing an unacknowledged request to have already edited a document.
+                    if self.sending.is_some() {
+                        if self.deferred.len() >= 64 {
+                            error = Some("Too many unacknowledged chat tools".into());
+                            break;
+                        }
+                        self.deferred.push_back(Output::Tool { epoch, id, call });
+                        continue;
+                    }
                     if epoch == self.epoch
                         && matches!(
                             call.name.as_str(),
@@ -594,6 +637,8 @@ impl<T> Panel<T> {
         }
         if let Some(error) = error {
             self.connection = None;
+            self.sending = None;
+            self.deferred.clear();
             self.tools.clear();
             self.view = None;
             self.fields.clear();
@@ -707,7 +752,18 @@ impl<T> Panel<T> {
                 self.action(host, &id, value).map(|_| ())
             } else {
                 self.command(host, ctx, &id)
-                    .unwrap_or_else(|| Err("Unknown chat action".into()))
+                    .unwrap_or_else(|| {
+                        // These actions stay in the component; never dispatch a new UI action
+                        // as an editor command. Reserve the namespace so AI cannot drive its own chat.
+                        if id.starts_with("ai.")
+                            && id.len() <= 256
+                            && !id.chars().any(char::is_control)
+                        {
+                            self.action(host, &id, value).map(|_| Value::Null)
+                        } else {
+                            Err("Invalid component action ID".into())
+                        }
+                    })
                     .map(|_| ())
             };
             if let Err(error) = result {
@@ -928,6 +984,7 @@ mod tests {
         );
     }
     struct TestHost {
+        started: usize,
         info: crate::HostInfo,
         preferences: crate::Preferences,
         instance: Arc<()>,
@@ -945,6 +1002,7 @@ mod tests {
             self.preferences.clone()
         }
         fn start_tool(&mut self, _: &crate::ToolCall) -> Result<(), String> {
+            self.started += 1;
             Err("Unexpected edit".into())
         }
         fn poll_tool(&mut self, _: &mut ()) -> Result<Option<Value>, String> {
@@ -969,6 +1027,7 @@ mod tests {
     #[test]
     fn attachment_opt_out_reaches_editor_preferences_before_the_next_action() {
         let mut host = TestHost {
+            started: 0,
             info: crate::core::editor::EditorTools {
                 name: "test",
                 methods: &["engine.commands"],
@@ -987,9 +1046,99 @@ mod tests {
         );
         assert!(!host.preferences().attach_frames);
     }
+    type Connected = (
+        Panel<()>,
+        TestHost,
+        mpsc::SyncSender<Result<Output, String>>,
+        mpsc::Receiver<Input>,
+    );
+    fn connected() -> Connected {
+        let host = TestHost {
+            started: 0,
+            info: crate::core::editor::EditorTools {
+                name: "test",
+                methods: &["engine.commands"],
+                views: &[],
+            }
+            .host_info("test", "Test", "test", "Attach"),
+            preferences: Default::default(),
+            instance: Arc::new(()),
+            rects: BTreeMap::new(),
+        };
+        let (send, commands) = mpsc::sync_channel(32);
+        let (events, receive) = mpsc::sync_channel(8);
+        let panel = Panel {
+            connection: Some(Connection {
+                child: None,
+                send,
+                receive,
+                ready: true,
+                started: Instant::now(),
+                version: "fixture".into(),
+            }),
+            epoch: 1,
+            instance: Some(host.instance.clone()),
+            ..Default::default()
+        };
+        (panel, host, events, commands)
+    }
+    #[test]
+    fn a_component_can_add_an_action_without_an_editor_command() {
+        let (mut panel, mut host, _events, commands) = connected();
+        panel.actions(
+            &mut host,
+            &egui::Context::default(),
+            vec![("ai.connection.close".into(), Value::Null)],
+        );
+        assert!(
+            commands
+                .try_iter()
+                .any(|p| matches!(p,Input::Action {id,..} if id=="ai.connection.close"))
+        );
+        assert_eq!(host.started, 0);
+    }
+    #[test]
+    fn editor_mutations_wait_for_send_acceptance() {
+        let (mut panel, mut host, events, _commands) = connected();
+        panel.sending = Some((7, "Draft".into()));
+        panel.local.prompt = "Draft".into();
+        events
+            .send(Ok(Output::Tool {
+                epoch: 1,
+                id: 1,
+                call: crate::ToolCall::new(
+                    "test",
+                    json!({"method":"engine.commands","params_json":"{}"}),
+                ),
+            }))
+            .unwrap();
+        let ctx = egui::Context::default();
+        panel.poll(&mut host, &ctx);
+        assert_eq!(host.started, 0);
+        events
+            .send(Ok(Output::View {
+                epoch: 1,
+                view: View {
+                    top: vec![],
+                    body: vec![],
+                    bottom: vec![],
+                    settings: vec![],
+                },
+                status: json!({"busy":true}),
+                submitted: Some(runtime::Receipt {
+                    serial: 7,
+                    accepted: true,
+                }),
+            }))
+            .unwrap();
+        panel.poll(&mut host, &ctx);
+        assert_eq!(host.started, 1);
+        assert!(panel.local.prompt.is_empty());
+    }
     #[test]
     fn native_component_layout_keeps_composer_visible_and_formats_markdown() {
         let host = TestHost {
+            started: 0,
             preferences: Default::default(),
             info: crate::core::editor::EditorTools {
                 name: "test",

@@ -19,6 +19,11 @@ an internal transport: tool payloads are never displayed as chat messages.
 The handshake advertises `send-receipts`. Action serials and send receipts ensure
 the editor clears a draft only after the service accepts it. Older editors can
 ignore these additive fields; this bridge requires the capability before use.
+Hosts advertise `component-actions` to allow new chat controls and actions in
+component releases. Interactive IDs stay in the reserved `ai.*` namespace and
+are forwarded privately to the component, rather than to editor command dispatch.
+Removed inputs release their transient drafts; a component can reset a form by
+assigning a new input ID. Editor mutations wait for Send acceptance.
 
 The service owns conversation logic, archives, secure credential access and a
 declarative view tree. The editor renders the tree using native egui controls:
