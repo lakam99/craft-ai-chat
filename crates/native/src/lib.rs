@@ -8,6 +8,7 @@
     clippy::unreachable
 )]
 
+pub mod component;
 pub mod credentials;
 pub mod history;
 mod transport;

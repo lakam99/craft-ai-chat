@@ -10,8 +10,10 @@
 
 mod archive;
 mod batch;
+pub mod client;
 mod conversation;
 mod guidance;
+pub mod service;
 mod ui;
 use conversation::Conversation;
 pub use conversation::{Activity, ActivityState, command_id, tool_label};
@@ -68,6 +70,10 @@ pub trait Host {
     fn open_preferences(&mut self) -> Result<(), String>;
     fn chat_is_open(&self) -> bool {
         true
+    }
+    /// A process bridge resolves current-pass guidance in the editor process.
+    fn external_guidance(&self) -> bool {
+        false
     }
     fn widget(&mut self, id: &str, response: &egui::Response, label: &str);
     fn area(&mut self, id: &str, rect: egui::Rect, label: &str);
@@ -585,10 +591,10 @@ impl<T> Panel<T> {
                         self.persist();
                         return Ok(result);
                     }
-                    if job.call.name == "highlight_ui" {
+                    if job.call.name == "highlight_ui" && !host.external_guidance() {
                         return self.guidance.apply(host, &job.call.arguments).map(Some);
                     }
-                    if job.call.name == "guide_state" {
+                    if job.call.name == "guide_state" && !host.external_guidance() {
                         if !job
                             .call
                             .arguments
@@ -599,7 +605,7 @@ impl<T> Panel<T> {
                         }
                         return guidance::state(host).map(Some);
                     }
-                    if job.call.name == "guide_ui" {
+                    if job.call.name == "guide_ui" && !host.external_guidance() {
                         if !job.started {
                             let instruction =
                                 self.guidance.start_step(host, &job.call.arguments)?;
