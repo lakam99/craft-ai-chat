@@ -13,6 +13,24 @@ use std::{
 };
 
 #[test]
+fn standalone_binary_retains_license_notices() {
+    let output = Command::new(env!("CARGO_BIN_EXE_craft-ai-chat-runtime"))
+        .arg("--licenses")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let notices = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "Craft AI Chat",
+        "Apache License",
+        "Permission is hereby granted",
+        "pulldown-cmark",
+    ] {
+        assert!(notices.contains(required), "{required}");
+    }
+}
+
+#[test]
 fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_craft-ai-chat-runtime"))
         .arg("--stdio-v1")

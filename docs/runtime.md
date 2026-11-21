@@ -64,3 +64,5 @@ Build the component with `cargo build --release -p craft-ai-chat-runtime` and
 bundle the platform-named executable beside an editor executable. Runtime assets
 are separate from editor releases. Only publish platforms actually built and
 tested; source support does not establish a tested binary release.
+The standalone executable also carries the project's distribution notices and
+Markdown dependency license texts; display them with `--licenses`.
