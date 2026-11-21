@@ -74,6 +74,7 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
         document: None,
         profile: None,
         open: true,
+        capabilities: vec![runtime::COMPONENT_ACTIONS.into()],
     };
     runtime::write(
         &mut input,
@@ -129,7 +130,7 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
         &mut input,
         &Input::Action {
             serial: 4,
-            snapshot,
+            snapshot: snapshot.clone(),
             id: "ai.send".into(),
             value: json!("Retain my unsent instruction"),
         },
@@ -149,6 +150,28 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
             }
         ) {
             assert!(encoded.contains("Retain my unsent instruction"));
+            assert!(encoded.contains("ai.connection.close"));
+            break;
+        }
+    }
+    runtime::write(
+        &mut input,
+        &Input::Action {
+            serial: 5,
+            snapshot,
+            id: "ai.connection.close".into(),
+            value: json!(null),
+        },
+    )
+    .unwrap();
+    loop {
+        let view = receive.recv_timeout(Duration::from_secs(10)).unwrap();
+        if matches!(view, Output::View { .. }) {
+            assert!(
+                !serde_json::to_string(&view)
+                    .unwrap()
+                    .contains("ai.connection.close")
+            );
             break;
         }
     }
@@ -204,6 +227,7 @@ fn incompatible_protocol_exits_before_loading_a_profile() {
         document: None,
         profile: None,
         open: true,
+        capabilities: vec![],
     };
     runtime::write(child.stdin.as_mut().unwrap(), &Input::Sync { snapshot }).unwrap();
     drop(child.stdin.take());

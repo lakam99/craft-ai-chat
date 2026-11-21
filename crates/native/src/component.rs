@@ -228,22 +228,22 @@ fn install() -> Result<String, String> {
     let name = platform().ok_or("Chat component updates are not yet packaged for this platform")?;
     let root = root().ok_or("Cannot locate your private component folder")?;
     let agent = agent();
-    let bytes = fetch(
+    let manifest_bytes = fetch(
         &agent,
         &format!("{REPOSITORY}/latest/download/chat-component-v1.json"),
         64 * 1024,
     )?;
     let manifest: Manifest =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid chat release manifest")?;
+        serde_json::from_slice(&manifest_bytes).map_err(|_| "Invalid chat release manifest")?;
     let asset = manifest.asset(name)?;
     let folder = root.join(&manifest.version);
     let path = folder.join(name);
     if path.is_file()
-        && let Ok(bytes) = read_file(&path, asset.size)
-        && verify(&bytes, asset).is_ok()
+        && let Ok(installed_bytes) = read_file(&path, asset.size)
+        && verify(&installed_bytes, asset).is_ok()
     {
         probe(&path)?;
-        activate(&root, &bytes)?;
+        activate(&root, &manifest_bytes)?;
         return Ok(format!(
             "Chat {} is installed. Close and reopen the editor to use it.",
             manifest.version
@@ -272,15 +272,23 @@ fn install() -> Result<String, String> {
     }
     std::fs::rename(&candidate, &path)
         .map_err(|_| "Cannot finish installing the chat component")?;
-    activate(&root, &bytes)?;
+    activate(&root, &manifest_bytes)?;
     Ok(format!(
         "Chat {} installed. Restart the editor when convenient; the current conversation is untouched.",
         manifest.version
     ))
 }
 fn activate(root: &Path, bytes: &[u8]) -> Result<(), String> {
+    let name = platform().ok_or("This platform does not support component activation")?;
+    if bytes.len() > 64 * 1024 {
+        return Err("Activation data must be a bounded release manifest".into());
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(bytes).map_err(|_| "Activation data must be a release manifest")?;
+    manifest.asset(name)?;
     let current = root.join("current.json");
-    if read_file(&current, 64 * 1024).ok().as_deref() == Some(bytes) {
+    let current_bytes = read_file(&current, 64 * 1024).ok();
+    if current_bytes.as_deref() == Some(bytes) {
         return Ok(());
     }
     let pointer = root.join(format!("current-{}.json", std::process::id()));
@@ -288,7 +296,10 @@ fn activate(root: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|_| "Cannot write the chat component activation record")?;
     // Keep one validated previous activation for recovery; never overwrite a running executable.
     let previous = root.join("previous.json");
-    if current.exists() {
+    if current_bytes
+        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+        .is_some_and(|m| m.asset(name).is_ok())
+    {
         std::fs::copy(&current, &previous)
             .map_err(|_| "Cannot preserve the previous chat component")?;
     }
@@ -336,23 +347,51 @@ impl Updater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn activation_manifest(version: &str) -> Vec<u8> {
+        serde_json::to_vec(&Manifest {
+            protocol: PROTOCOL,
+            version: version.into(),
+            assets: vec![Asset {
+                name: platform().unwrap_or("unsupported").into(),
+                size: 3,
+                sha256: format!("{:x}", Sha256::digest(b"abc")),
+            }],
+        })
+        .unwrap()
+    }
     #[test]
     fn activation_keeps_the_previous_version_and_repeated_checks_do_not_replace_it() {
         let dir = tempfile::tempdir().unwrap();
-        activate(dir.path(), b"first").unwrap();
-        activate(dir.path(), b"second").unwrap();
+        if platform().is_none() {
+            return;
+        }
+        let first = activation_manifest("0.6.0");
+        let second = activation_manifest("0.6.1");
+        activate(dir.path(), &first).unwrap();
+        activate(dir.path(), &second).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join("current.json")).unwrap(),
-            b"second"
+            second
         );
         assert_eq!(
             std::fs::read(dir.path().join("previous.json")).unwrap(),
-            b"first"
+            first
         );
-        activate(dir.path(), b"second").unwrap();
+        activate(dir.path(), &second).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join("previous.json")).unwrap(),
-            b"first"
+            first
+        );
+        assert!(activate(dir.path(), b"MZ executable bytes are not a manifest").is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("current.json")).unwrap(),
+            second
+        );
+        std::fs::write(dir.path().join("current.json"), b"damaged activation").unwrap();
+        activate(dir.path(), &second).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("previous.json")).unwrap(),
+            first
         );
     }
     #[test]

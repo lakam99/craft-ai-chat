@@ -171,10 +171,23 @@ impl Panel<u64> {
             ),
         ];
         if self.connection_open {
+            let mut connection = settings.clone();
+            if host
+                .snapshot
+                .capabilities
+                .iter()
+                .any(|c| c == runtime::COMPONENT_ACTIONS)
+            {
+                connection.push(button(
+                    "ai.connection.close",
+                    "Close connection settings",
+                    true,
+                ));
+            }
             top.push(Node::Card {
                 id: "ai.connection.settings".into(),
                 accent: false,
-                children: settings.clone(),
+                children: connection,
             });
         }
         top.push(Node::Separator);
@@ -301,6 +314,10 @@ impl Panel<u64> {
         value: Value,
     ) -> Result<(), String> {
         match id {
+            "ai.connection.close" => {
+                self.connection_open = false;
+                Ok(())
+            }
             "ai.prompt" => {
                 self.prompt = value
                     .as_str()
@@ -450,9 +467,6 @@ pub fn run() -> Result<(), String> {
         if let Some(host) = &mut host {
             panel.poll(host, &ctx);
             panel.initialize_vault(&ctx);
-            for packet in host.outgoing.drain(..) {
-                runtime::write(&mut output, &packet)?;
-            }
             let view = panel.remote_view(host);
             view.validate()?;
             let packet = Output::View {
@@ -465,6 +479,10 @@ pub fn run() -> Result<(), String> {
             if encoded != previous {
                 runtime::write(&mut output, &packet)?;
                 previous = encoded;
+            }
+            // Report Send acceptance before requesting any editor mutation.
+            for packet in host.outgoing.drain(..) {
+                runtime::write(&mut output, &packet)?;
             }
         }
     }
@@ -491,6 +509,7 @@ mod tests {
                 document: None,
                 profile: None,
                 open: true,
+                capabilities: Vec::new(),
             },
             instance: Arc::new(()),
             next: 0,
@@ -511,6 +530,27 @@ mod tests {
         assert!(encoded.contains("markdown"));
         assert!(!encoded.contains("secret-api-key"));
         assert!(!encoded.contains("params_json"));
+    }
+    #[test]
+    fn new_component_controls_are_negotiated_without_breaking_old_hosts() {
+        let mut host = bridge();
+        let panel = Panel::<u64> {
+            connection_open: true,
+            ..Default::default()
+        };
+        assert!(
+            !serde_json::to_string(&panel.remote_view(&host))
+                .unwrap()
+                .contains("ai.connection.close")
+        );
+        host.snapshot
+            .capabilities
+            .push(runtime::COMPONENT_ACTIONS.into());
+        assert!(
+            serde_json::to_string(&panel.remote_view(&host))
+                .unwrap()
+                .contains("ai.connection.close")
+        );
     }
     #[test]
     fn document_epoch_replaces_identity_and_drops_pending_replies() {
