@@ -118,6 +118,8 @@ pub struct Panel<T> {
     bridge_error: String,
     sent_prompt: String,
     attempted: Vec<PathBuf>,
+    requested: bool,
+    source_mode: bool,
 }
 impl<T> Default for Panel<T> {
     fn default() -> Self {
@@ -139,6 +141,8 @@ impl<T> Default for Panel<T> {
             bridge_error: String::new(),
             sent_prompt: String::new(),
             attempted: Vec::new(),
+            requested: false,
+            source_mode: false,
         }
     }
 }
@@ -154,6 +158,17 @@ impl<T> DerefMut for Panel<T> {
     }
 }
 impl<T> Panel<T> {
+    fn choose_component(&mut self, paths: Vec<PathBuf>) -> Option<PathBuf> {
+        if self.source_mode {
+            return None;
+        }
+        let candidate = paths.into_iter().find(|p| !self.attempted.contains(p));
+        // Installing a component later must not replace a source-integrated conversation.
+        if candidate.is_none() && self.attempted.is_empty() {
+            self.source_mode = true;
+        }
+        candidate
+    }
     fn snapshot<H: Host<Tool = T>>(&mut self, host: &H) -> Snapshot {
         let instance = host.instance();
         if self
@@ -233,6 +248,12 @@ impl<T> Panel<T> {
         if id == "ai.update" {
             self.updater.check(ctx_wake(ctx));
             return Some(Ok(json!({"pending":true})));
+        }
+        if matches!(
+            id,
+            "ai.send" | "ai.connection" | "ai.saveKey" | "ai.loadKey" | "ai.forgetKey"
+        ) {
+            self.requested = true;
         }
         self.poll(host, ctx);
         if self.failed {
@@ -318,16 +339,16 @@ impl<T> Panel<T> {
     pub fn poll<H: Host<Tool = T>>(&mut self, host: &mut H, ctx: &egui::Context) {
         self.updater.poll();
         if self.local.busy() {
+            self.source_mode = true;
             self.local.poll(host, ctx);
             return;
         }
         if self.connection.is_none()
             && !self.failed
+            && !self.source_mode
             && host.credential_profile().is_some()
-            && host.chat_is_open()
-            && let Some(path) = craft_ai_chat_native::component::candidates()
-                .into_iter()
-                .find(|p| !self.attempted.contains(p))
+            && (host.chat_is_open() || self.requested)
+            && let Some(path) = self.choose_component(craft_ai_chat_native::component::candidates())
         {
             self.attempted.push(path.clone());
             match Connection::start(path, ctx) {
@@ -549,6 +570,7 @@ impl<T> Panel<T> {
         }
     }
     pub fn show<H: Host<Tool = T>>(&mut self, host: &mut H, ui: &mut egui::Ui, rect: egui::Rect) {
+        self.requested = true;
         self.poll(host, ui.ctx());
         egui::Panel::bottom("ai.component.update")
             .frame(egui::Frame::NONE)
@@ -611,6 +633,7 @@ impl<T> Panel<T> {
         ui: &mut egui::Ui,
         _preferences: bool,
     ) {
+        self.requested = true;
         self.poll(host, ui.ctx());
         if self.failed {
             ui.label(&self.bridge_error);
@@ -813,6 +836,21 @@ fn ctx_wake(ctx: &egui::Context) -> craft_ai_chat_native::Wake {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installing_a_component_does_not_switch_an_existing_source_conversation() {
+        let mut panel = Panel::<()>::default();
+        assert!(panel.choose_component(vec![]).is_none());
+        assert!(
+            panel
+                .choose_component(vec![PathBuf::from("new-component")])
+                .is_none()
+        );
+        let mut fresh = Panel::<()>::default();
+        assert_eq!(
+            fresh.choose_component(vec![PathBuf::from("new-component")]),
+            Some(PathBuf::from("new-component"))
+        );
+    }
     struct TestHost {
         info: crate::HostInfo,
         instance: Arc<()>,
