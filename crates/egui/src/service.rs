@@ -16,6 +16,7 @@ struct Bridge {
     next: u64,
     replies: BTreeMap<u64, Result<Value, String>>,
     outgoing: Vec<Output>,
+    submitted: Option<runtime::Receipt>,
 }
 impl Bridge {
     fn sync(&mut self, snapshot: Snapshot) -> Result<(), String> {
@@ -23,6 +24,7 @@ impl Bridge {
         if self.snapshot.epoch != snapshot.epoch {
             self.instance = Arc::new(());
             self.replies.clear();
+            self.submitted = None;
         }
         self.snapshot = snapshot;
         Ok(())
@@ -367,6 +369,7 @@ pub fn run() -> Result<(), String> {
         &Output::Ready {
             protocol: runtime::PROTOCOL,
             version: env!("CARGO_PKG_VERSION").into(),
+            capabilities: vec![runtime::SEND_RECEIPTS.into()],
         },
     )?;
     let ctx = egui::Context::default();
@@ -374,6 +377,10 @@ pub fn run() -> Result<(), String> {
     let mut panel = Panel::<u64>::default();
     let mut previous = Vec::new();
     loop {
+        // Drain viewport repaint commands issued by shared worker wakeups. This process
+        // has no window/event loop to consume them, so an undrained context grows forever.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         match receive.recv_timeout(Duration::from_millis(40)) {
             Ok(Ok(Input::Shutdown)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Err(error)) => return Err(error),
@@ -388,10 +395,12 @@ pub fn run() -> Result<(), String> {
                         next: 0,
                         replies: BTreeMap::new(),
                         outgoing: Vec::new(),
+                        submitted: None,
                     });
                 }
             }
             Ok(Ok(Input::Action {
+                serial,
                 snapshot,
                 id,
                 value,
@@ -404,11 +413,22 @@ pub fn run() -> Result<(), String> {
                         next: 0,
                         replies: BTreeMap::new(),
                         outgoing: Vec::new(),
+                        submitted: None,
                     });
                 }
                 if let Some(host) = &mut host {
                     host.sync(snapshot)?;
-                    if let Err(error) = panel.remote_action(host, &ctx, &id, value) {
+                    let result = panel.remote_action(host, &ctx, &id, value);
+                    if id == "ai.send" {
+                        host.submitted = Some(runtime::Receipt {
+                            serial,
+                            accepted: result.is_ok(),
+                        });
+                    }
+                    if let Err(error) = result {
+                        if id == "ai.send" && crate::core::validate_key(panel.key.trim()).is_err() {
+                            panel.connection_open = true;
+                        }
                         panel.message = error.clone();
                         panel.record("Notice", error);
                     }
@@ -439,6 +459,7 @@ pub fn run() -> Result<(), String> {
                 epoch: host.snapshot.epoch,
                 view,
                 status: panel.status(host),
+                submitted: host.submitted,
             };
             let encoded = serde_json::to_vec(&packet).map_err(|_| "Cannot encode chat view")?;
             if encoded != previous {
@@ -475,6 +496,7 @@ mod tests {
             next: 0,
             replies: BTreeMap::new(),
             outgoing: vec![],
+            submitted: None,
         }
     }
     #[test]

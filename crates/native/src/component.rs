@@ -216,8 +216,9 @@ fn probe(path: &Path) -> Result<(), String> {
         packet,
         craft_ai_chat_core::runtime::Output::Ready {
             protocol: PROTOCOL,
+            capabilities,
             ..
-        }
+        } if capabilities.iter().any(|v|v==craft_ai_chat_core::runtime::SEND_RECEIPTS)
     ) {
         return Err("The downloaded chat component requires a different editor bridge".into());
     }

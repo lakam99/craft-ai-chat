@@ -88,6 +88,7 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
     runtime::write(
         &mut input,
         &Input::Action {
+            serial: 1,
             snapshot: snapshot.clone(),
             id: "ai.key".into(),
             value: json!(secret),
@@ -99,7 +100,8 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
     runtime::write(
         &mut input,
         &Input::Action {
-            snapshot,
+            serial: 2,
+            snapshot: snapshot.clone(),
             id: "ai.prompt".into(),
             value: json!("A new draft"),
         },
@@ -110,6 +112,43 @@ fn standalone_component_handshakes_renders_and_keeps_secrets_out_of_views() {
         let encoded = serde_json::to_string(&view).unwrap();
         assert!(!encoded.contains(secret));
         if encoded.contains("A new draft") {
+            break;
+        }
+    }
+    runtime::write(
+        &mut input,
+        &Input::Action {
+            serial: 3,
+            snapshot: snapshot.clone(),
+            id: "ai.key".into(),
+            value: json!(""),
+        },
+    )
+    .unwrap();
+    runtime::write(
+        &mut input,
+        &Input::Action {
+            serial: 4,
+            snapshot,
+            id: "ai.send".into(),
+            value: json!("Retain my unsent instruction"),
+        },
+    )
+    .unwrap();
+    loop {
+        let view = receive.recv_timeout(Duration::from_secs(10)).unwrap();
+        let encoded = serde_json::to_string(&view).unwrap();
+        if matches!(
+            view,
+            Output::View {
+                submitted: Some(runtime::Receipt {
+                    serial: 4,
+                    accepted: false
+                }),
+                ..
+            }
+        ) {
+            assert!(encoded.contains("Retain my unsent instruction"));
             break;
         }
     }
