@@ -1,12 +1,14 @@
 # Craft AI Chat
 
-A shared Rust plugin for docked AI chat in Craft applications. FilmCraft and
-EffectCraft integrate the same panel through small, product-owned adapters.
+A shared Rust plugin for docked AI chat in Craft applications. FilmCraft,
+EffectCraft, SoundCraft and PhotoCraft integrate through product-owned adapters.
 Other editors can advertise their own tools and active-view context without
 depending on either video editor.
 
-This is a source integration, not a runtime plugin file for already-built apps.
-The application must be rebuilt with an adapter.
+Native apps can use `craft_ai_chat_egui::client::Panel` with the independently
+updated `craft-ai-chat-runtime` component. One editor update installs the bridge;
+subsequent chat layout, conversation and AI changes ship independently. Existing
+source-integrated `Panel` adapters remain supported. See [Native component](docs/runtime.md).
 
 ## Packages
 

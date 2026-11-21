@@ -281,7 +281,7 @@ pub(crate) fn outcome(value: &Value) -> (ActivityState, String) {
 
 /// Replies are untrusted: never let Markdown load local/remote images or open non-web URI schemes.
 /// Bound nesting before entering the third-party renderer; deep content stays selectable plain text.
-fn prepare_markdown(text: &str) -> Option<String> {
+pub(crate) fn prepare_markdown(text: &str) -> Option<String> {
     use pulldown_cmark::{Event, Options, Parser, Tag};
     let mut depth = 0usize;
     let mut omitted = Vec::new();

@@ -13,6 +13,7 @@ pub mod bounds;
 pub mod editor;
 pub mod history;
 pub mod protocol;
+pub mod runtime;
 pub mod tool_results;
 
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,7 @@ impl Preferences {
 }
 
 /// Host-owned tool schemas: image editors, documents, audio and 3D tools use the same contract.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostInfo {
     pub id: String,
     pub name: String,
