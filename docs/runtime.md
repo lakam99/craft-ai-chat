@@ -37,6 +37,11 @@ epochs reject stale edits. Highlights and walkthrough observations resolve in
 the editor using current widget geometry, not coordinates from the service.
 There is no arbitrary shell-command tool.
 
+Hosts call the bridge's `poll` after an accepted editor layout, or before clearing
+the previous completed layout's widget registry. Rendering the chat and reading
+its status only pump transport and views; they defer editor tools to that explicit
+poll, so a new walkthrough step never resolves against a half-drawn workspace.
+
 ## Settings and continuity
 
 Model, attachments, remember-key and remember-history preferences remain in the
