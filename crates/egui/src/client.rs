@@ -1,4 +1,6 @@
 //! Stable native renderer and private-pipe client. No editor authority crosses into the service.
+//! Call `Panel::poll` explicitly after a completed editor layout, or before the next layout
+//! clears its accepted widget registry. Drawing the chat or reading status never runs tools.
 use crate::{Host, Panel as LocalPanel};
 use craft_ai_chat_core::runtime::{self, Input, Node, Output, Profile, Snapshot, TextStyle, View};
 use serde_json::{Value, json};
@@ -302,7 +304,7 @@ impl<T> Panel<T> {
         ) {
             self.requested = true;
         }
-        self.poll(host, ctx);
+        self.pump(host, ctx, false);
         if self.failed {
             if id == "ai.connection" {
                 if craft_ai_chat_native::component::candidates()
@@ -313,7 +315,7 @@ impl<T> Panel<T> {
                 }
                 self.failed = false;
                 self.bridge_error.clear();
-                self.poll(host, ctx);
+                self.pump(host, ctx, false);
                 return Some(Ok(Value::Null));
             }
             return Some(if id == "ai.status" {
@@ -389,10 +391,15 @@ impl<T> Panel<T> {
         Some(result)
     }
     pub fn poll<H: Host<Tool = T>>(&mut self, host: &mut H, ctx: &egui::Context) {
+        self.pump(host, ctx, true);
+    }
+    fn pump<H: Host<Tool = T>>(&mut self, host: &mut H, ctx: &egui::Context, dispatch_tools: bool) {
         self.updater.poll();
         if self.local.busy() {
             self.source_mode = true;
-            self.local.poll(host, ctx);
+            if dispatch_tools {
+                self.local.poll(host, ctx);
+            }
             return;
         }
         if self.connection.is_none()
@@ -412,7 +419,7 @@ impl<T> Panel<T> {
             }
         }
         if self.connection.is_none() {
-            if !self.failed {
+            if dispatch_tools && !self.failed {
                 self.local.poll(host, ctx);
             }
             return;
@@ -430,7 +437,7 @@ impl<T> Panel<T> {
         }
         let mut error = None;
         for _ in 0..16 {
-            let waiting = if self.sending.is_none() {
+            let waiting = if dispatch_tools && self.sending.is_none() {
                 self.deferred.pop_front().map(Ok)
             } else {
                 None
@@ -493,11 +500,12 @@ impl<T> Panel<T> {
                     self.markdown.clear_viewers();
                 }
                 Ok(Output::Tool { epoch, id, call }) => {
-                    // A lost Send acknowledgment must leave a retryable draft without
-                    // allowing an unacknowledged request to have already edited a document.
-                    if self.sending.is_some() {
+                    // Drawing chat precedes other panels in many hosts. Only the host's
+                    // explicit poll has a completed widget registry for guides and tools.
+                    // A pending Send receipt must also prevent premature editor mutations.
+                    if !dispatch_tools || self.sending.is_some() {
                         if self.deferred.len() >= 64 {
-                            error = Some("Too many unacknowledged chat tools".into());
+                            error = Some("Too many deferred chat tools".into());
                             break;
                         }
                         self.deferred.push_back(Output::Tool { epoch, id, call });
@@ -590,7 +598,7 @@ impl<T> Panel<T> {
                 _ => {}
             }
         }
-        if let Some((epoch, id)) = self.guide {
+        if dispatch_tools && let Some((epoch, id)) = self.guide {
             let result = self.local.guidance.step_result(host);
             if !matches!(result, Ok(None)) {
                 self.guide = None;
@@ -604,7 +612,7 @@ impl<T> Panel<T> {
             }
         }
         let mut index = 0;
-        while index < self.tools.len() {
+        while dispatch_tools && index < self.tools.len() {
             let Some((epoch, id, tool, instance)) = self.tools.get_mut(index) else {
                 break;
             };
@@ -652,7 +660,7 @@ impl<T> Panel<T> {
     }
     pub fn show<H: Host<Tool = T>>(&mut self, host: &mut H, ui: &mut egui::Ui, rect: egui::Rect) {
         self.requested = true;
-        self.poll(host, ui.ctx());
+        self.pump(host, ui.ctx(), false);
         egui::Panel::bottom("ai.component.update")
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -720,7 +728,7 @@ impl<T> Panel<T> {
         _preferences: bool,
     ) {
         self.requested = true;
-        self.poll(host, ui.ctx());
+        self.pump(host, ui.ctx(), false);
         if self.failed {
             ui.label(&self.bridge_error);
             return;
@@ -1081,6 +1089,42 @@ mod tests {
             ..Default::default()
         };
         (panel, host, events, commands)
+    }
+    #[test]
+    fn rendering_and_status_do_not_dispatch_tools_before_editor_widgets_exist() {
+        for render in [true, false] {
+            let (mut panel, mut host, events, _commands) = connected();
+            events
+                .send(Ok(Output::Tool {
+                    epoch: 1,
+                    id: 1,
+                    call: crate::ToolCall::new(
+                        "test",
+                        json!({"method":"engine.commands","params_json":"{}"}),
+                    ),
+                }))
+                .unwrap();
+            let ctx = egui::Context::default();
+            ctx.run_ui(Default::default(), |ui| {
+                if render {
+                    let rect = ui.available_rect_before_wrap();
+                    panel.show(&mut host, ui, rect);
+                } else {
+                    let _ = panel.command(&mut host, &ctx, "ai.status");
+                }
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(
+                host.started, 0,
+                "drawing chat and reading status must not execute editor tools against a partial widget registry"
+            );
+            assert_eq!(panel.deferred.len(), 1);
+            panel.poll(&mut host, &ctx);
+            assert_eq!(
+                host.started, 1,
+                "the editor's explicit poll dispatches after its widgets are drawn"
+            );
+        }
     }
     #[test]
     fn a_component_can_add_an_action_without_an_editor_command() {
