@@ -32,7 +32,23 @@ impl<T> Batch<T> {
         }
         value
     }
+    #[cfg(test)]
     pub fn poll<H: Host<Tool = T>>(&mut self, host: &mut H) -> Result<Option<Value>, String> {
+        self.poll_stopping(host, false)
+    }
+    pub fn active(&self) -> bool {
+        self.tool.is_some()
+    }
+    pub fn poll_stopping<H: Host<Tool = T>>(
+        &mut self,
+        host: &mut H,
+        stopping: bool,
+    ) -> Result<Option<Value>, String> {
+        if stopping && self.tool.is_none() {
+            return Ok(Some(self.finish(Some(
+                "Interrupted; completed commands must not be replayed",
+            ))));
+        }
         let Some(call) = self.calls.get(self.completed) else {
             return Ok(Some(self.finish(None)));
         };
@@ -80,7 +96,11 @@ impl<T> Batch<T> {
         self.completed += 1;
         self.tool = None;
         self.deadline = None;
-        if self.completed == self.total() {
+        if stopping {
+            Ok(Some(self.finish(Some(
+                "Interrupted after the current command; completed commands must not be replayed",
+            ))))
+        } else if self.completed == self.total() {
             Ok(Some(self.finish(None)))
         } else {
             Ok(None)

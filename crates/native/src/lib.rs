@@ -11,6 +11,8 @@
 pub mod component;
 pub mod credentials;
 pub mod history;
+pub mod journal;
+pub mod library;
 mod transport;
 pub use transport::http;
 

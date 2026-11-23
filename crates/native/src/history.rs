@@ -13,10 +13,12 @@ use std::{
 };
 pub const MAX_ARCHIVE: usize = 8 * 1024 * 1024;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+type Confirmation = mpsc::Sender<Result<(), String>>;
 pub struct Store {
     sender: Option<mpsc::SyncSender<()>>,
     pub events: mpsc::Receiver<Result<Option<Value>, String>>,
     pending: Arc<Mutex<Option<Value>>>,
+    confirmations: Arc<Mutex<Vec<Confirmation>>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Store {
@@ -34,26 +36,53 @@ impl Store {
         let path = parent
             .join("ai-chat-history")
             .join(format!("{:x}.json", Sha256::digest(identity.as_bytes())));
+        Self::open_path(path, None, wake)
+    }
+    pub(crate) fn open_path(
+        path: PathBuf,
+        fallback: Option<PathBuf>,
+        wake: Wake,
+    ) -> Result<Self, String> {
         let (sender, receive) = mpsc::sync_channel::<()>(1);
         let pending = Arc::new(Mutex::new(None::<Value>));
         let queued = pending.clone();
+        let confirmations = Arc::new(Mutex::new(Vec::<mpsc::Sender<Result<(), String>>>::new()));
+        let waiting = confirmations.clone();
         let (events, receiver) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("craft-chat-history".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if events.send(load(&path)).is_err() {
+                    let loaded = load(&path).and_then(|value| match (value, fallback) {
+                        (None, Some(old)) => {
+                            let value = load(&old)?;
+                            if let Some(value) = &value {
+                                save(&path, value)?;
+                            }
+                            Ok(value)
+                        }
+                        (value, _) => Ok(value),
+                    });
+                    if events.send(loaded).is_err() {
                         return;
                     }
                     wake();
+                    let mut last = Ok(());
                     while receive.recv().is_ok() {
-                        let Some(value) =
-                            queued.lock().unwrap_or_else(PoisonError::into_inner).take()
-                        else {
-                            continue;
+                        let (value, confirmations) = {
+                            let mut pending = queued.lock().unwrap_or_else(PoisonError::into_inner);
+                            let mut confirmations =
+                                waiting.lock().unwrap_or_else(PoisonError::into_inner);
+                            (pending.take(), std::mem::take(&mut *confirmations))
                         };
-                        if let Err(error) = save(&path, &value) {
-                            let _ = events.send(Err(error));
+                        if let Some(value) = value {
+                            last = save(&path, &value);
+                        }
+                        for reply in confirmations {
+                            let _ = reply.send(last.clone());
+                        }
+                        if let Err(error) = &last {
+                            let _ = events.send(Err(error.clone()));
                             wake();
                         }
                     }
@@ -70,6 +99,7 @@ impl Store {
             sender: Some(sender),
             events: receiver,
             pending,
+            confirmations,
             worker: Some(worker),
         })
     }
@@ -81,6 +111,15 @@ impl Store {
         if let Some(sender) = &self.sender {
             let _ = sender.try_send(());
         }
+    }
+    /// Acknowledge the latest queued snapshot only after the writer has flushed it.
+    /// The UI never waits for disk; a model worker waits on the returned receipt.
+    pub fn confirm(&mut self, reply: mpsc::Sender<Result<(), String>>) {
+        self.confirmations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(reply);
+        self.flush();
     }
 }
 impl Drop for Store {

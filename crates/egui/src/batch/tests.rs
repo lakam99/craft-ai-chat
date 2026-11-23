@@ -1,4 +1,5 @@
 use super::*;
+mod goals;
 mod history;
 use crate::*;
 use std::sync::{
@@ -334,16 +335,6 @@ fn local_history_restores_after_restart_is_scoped_and_new_chat_clears_it() {
         "Remember my naming rule sk-private-test-key-that-must-not-be-saved".into();
     panel.send_with(&mut host, &ctx, |_| Ok(message())).unwrap();
     finish(&mut panel, &mut host);
-    let folder = dir.path().join("ai-chat-history");
-    while (!folder.is_dir()
-        || std::fs::read_dir(&folder)
-            .unwrap()
-            .filter_map(Result::ok)
-            .all(|e| e.path().extension().is_none_or(|s| s != "json")))
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(2));
-    }
     drop(panel);
     let mut restored = Panel::<Value>::default();
     restored.poll(&mut host, &ctx);

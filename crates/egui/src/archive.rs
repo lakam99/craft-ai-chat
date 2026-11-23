@@ -2,9 +2,14 @@ use crate::*;
 #[derive(Default)]
 pub(super) struct Archive {
     key: Option<(std::path::PathBuf, String, String)>,
-    store: Option<craft_ai_chat_native::history::Store>,
+    pub(super) store: Option<craft_ai_chat_native::history::Store>,
     loading: bool,
     pub message: String,
+    pub library: Option<craft_ai_chat_native::library::Library>,
+    pub browsing: bool,
+    pub saved: bool,
+    pub query: String,
+    pub blocked: bool,
 }
 impl Archive {
     pub fn loading(&self) -> bool {
@@ -33,11 +38,6 @@ impl<T> Panel<T> {
                 .as_ref()
                 .zip(key.as_ref())
                 .is_some_and(|(old, new)| old != new);
-            if key.is_none()
-                && let Some(store) = &mut self.archive.store
-            {
-                store.queue(json!({"version":1,"model":"","history":[],"transcript":[]}));
-            }
             self.archive = Archive {
                 key: key.clone(),
                 ..Default::default()
@@ -53,14 +53,28 @@ impl<T> Panel<T> {
                 self.chat.clear();
                 self.history_instance = None;
                 self.batch_progress = None;
+                self.goal = None;
+                self.goal_mode = false;
+                self.queued.clear();
+                self.resume_queued = false;
+                self.transport = None;
             }
             if let Some((path, id, document)) = key {
-                match craft_ai_chat_native::history::Store::open(&path, &id, &document, wake(ctx)) {
-                    Ok(store) => {
+                match craft_ai_chat_native::library::Library::open(&path, &id, &document).and_then(
+                    |mut library| {
+                        let store = library.store(wake(ctx))?;
+                        Ok((library, store))
+                    },
+                ) {
+                    Ok((library, store)) => {
+                        self.archive.library = Some(library);
                         self.archive.store = Some(store);
                         self.archive.loading = true;
                     }
-                    Err(error) => self.archive.message = error,
+                    Err(error) => {
+                        self.archive.message = error;
+                        self.archive.blocked = true;
+                    }
                 }
             }
         }
@@ -76,6 +90,8 @@ impl<T> Panel<T> {
                     if self.history.is_empty() && self.chat.transcript.is_empty() {
                         if let Err(error) = self.restore_archive(value) {
                             self.archive.message = error;
+                            self.archive.blocked = true;
+                            self.goal_mode = false;
                         }
                         self.history_instance = Some(host.instance());
                     } else {
@@ -89,7 +105,10 @@ impl<T> Panel<T> {
                         self.persist();
                     }
                 }
-                Err(error) => self.archive.message = error,
+                Err(error) => {
+                    self.archive.message = error;
+                    self.archive.blocked = true;
+                }
             }
         }
         if self.archive.loading {
@@ -140,10 +159,30 @@ impl<T> Panel<T> {
         );
         self.chat.restore(rows);
         self.history_model = value["model"].as_str().unwrap_or_default().into();
+        self.goal_mode = value["goalMode"].as_bool().unwrap_or(false);
+        let queued: Vec<String> =
+            serde_json::from_value(value.get("queued").cloned().unwrap_or(json!([])))
+                .map_err(|_| "Invalid saved chat interruptions")?;
+        if queued.len() > 8 || queued.iter().map(String::len).sum::<usize>() > 32768 {
+            return Err("Saved chat interruptions exceed their bounds".into());
+        }
+        self.queued = queued;
+        self.resume_queued = false;
+        self.goal = None;
+        if !value["goal"].is_null() {
+            let goal: core::goal::Goal =
+                serde_json::from_value(value["goal"].clone()).map_err(|_| "Invalid saved goal")?;
+            let profile = self
+                .profile
+                .as_ref()
+                .ok_or("Saved goal requires a preferences profile")?;
+            self.goal = Some(goals::Session::open(profile, &self.host_id, goal, true)?);
+        }
         Ok(())
     }
     pub(super) fn persist(&mut self) {
-        if self.archive.loading || self.archive.store.is_none() {
+        self.archive.saved = false;
+        if self.archive.loading || self.archive.blocked || self.archive.store.is_none() {
             return;
         }
         let mut history = self.history.clone();
@@ -153,7 +192,11 @@ impl<T> Panel<T> {
         core::history::omit_media(&mut history);
         // Responses requires reasoning items alongside their function calls/outputs.
         // Keep the opaque provider state intact; it is never rendered as chat text.
-        let mut value = json!({"version":1,"model":self.history_model,"history":history,"transcript":self.chat.transcript});
+        let goal = self
+            .goal
+            .as_ref()
+            .map(|goal| goals::lock(goal).goal.clone());
+        let mut value = json!({"version":1,"model":self.history_model,"history":history,"transcript":self.chat.transcript,"goalMode":self.goal_mode,"goal":goal,"queued":self.queued});
         while core::bounds::value_size(&value, craft_ai_chat_native::history::MAX_ARCHIVE).is_err()
         {
             // Reproducible observations must never prevent saving the user's conversation.
@@ -181,10 +224,64 @@ impl<T> Panel<T> {
         }
         if let Some(store) = &mut self.archive.store {
             store.queue(value);
+            self.archive.saved = true;
+        }
+        if let Some(library) = &mut self.archive.library
+            && let Some((_, first)) = self.chat.transcript.iter().find(|(role, _)| role == "You")
+        {
+            let title = if self.key.trim().is_empty() {
+                first.clone()
+            } else {
+                first.replace(self.key.trim(), "[API key omitted]")
+            };
+            if let Err(error) = library.title(&title) {
+                self.archive.message = error;
+            }
         }
     }
+    pub(super) fn switch_chat<H: Host<Tool = T>>(
+        &mut self,
+        host: &H,
+        ctx: &egui::Context,
+        id: Option<&str>,
+    ) -> Result<(), String> {
+        if self.busy() {
+            return Err("Pause the assistant before switching chats".into());
+        }
+        if self.archive.loading {
+            return Err("Wait for chat history to load".into());
+        }
+        self.persist();
+        if let Some(library) = &mut self.archive.library {
+            if let Some(id) = id {
+                library.select(id)?;
+            } else {
+                library.create()?;
+            }
+            // Dropping the old writer drains its last snapshot before another chat opens.
+            self.archive.store.take();
+            self.archive.store = Some(library.store(wake(ctx))?);
+            self.archive.loading = true;
+        } else if id.is_some() {
+            return Err("Enable local history to reopen saved chats".into());
+        }
+        self.goal = None;
+        self.goal_mode = false;
+        self.queued.clear();
+        self.resume_queued = false;
+        self.transport = None;
+        self.guidance.clear();
+        self.history.clear();
+        self.chat.clear();
+        self.markdown_cache = egui_commonmark::CommonMarkCache::default();
+        self.message.clear();
+        self.history_instance = Some(host.instance());
+        self.archive.browsing = false;
+        self.archive.blocked = false;
+        Ok(())
+    }
 }
-fn redact(value: &mut Value, key: &str) {
+pub(super) fn redact(value: &mut Value, key: &str) {
     let mut stack = vec![value];
     while let Some(value) = stack.pop() {
         match value {
