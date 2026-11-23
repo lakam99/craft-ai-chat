@@ -73,6 +73,12 @@ installers. Versioned folders avoid replacing running executables. Activation
 keeps the previous manifest and bundled component as recovery candidates. No
 project, preference archive or saved credential is moved by component updates.
 
+The update check uses the running component's completed handshake, not the
+activation pointer, to decide whether a restart is needed. Checking the running
+release reports that chat is up to date without reinstalling or restarting it.
+A newer running version is never downgraded to an older published release. The
+host footer shows the active version and disables repeated checks while busy.
+
 Build the component with `cargo build --release -p craft-ai-chat-runtime` and
 bundle the platform-named executable beside an editor executable. Runtime assets
 are separate from editor releases. Only publish platforms actually built and

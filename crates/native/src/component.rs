@@ -224,7 +224,22 @@ fn probe(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn install() -> Result<String, String> {
+fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    if !valid_version(a) || !valid_version(b) {
+        return None;
+    }
+    for (a, b) in a.split('.').zip(b.split('.')) {
+        // Compare bounded decimal components without overflowing integer parsing.
+        let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+        let order = a.len().cmp(&b.len()).then_with(|| a.cmp(b));
+        if !order.is_eq() {
+            return Some(order);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+fn install(running: Option<&str>) -> Result<String, String> {
     let name = platform().ok_or("Chat component updates are not yet packaged for this platform")?;
     let root = root().ok_or("Cannot locate your private component folder")?;
     let agent = agent();
@@ -233,9 +248,49 @@ fn install() -> Result<String, String> {
         &format!("{REPOSITORY}/latest/download/chat-component-v1.json"),
         64 * 1024,
     )?;
+    install_manifest(
+        &root,
+        name,
+        &manifest_bytes,
+        running,
+        |manifest, asset| {
+            fetch(
+                &agent,
+                &format!("{REPOSITORY}/download/v{}/{name}", manifest.version),
+                asset.size,
+            )
+        },
+        probe,
+    )
+}
+
+fn install_manifest(
+    root: &Path,
+    name: &str,
+    manifest_bytes: &[u8],
+    running: Option<&str>,
+    download: impl FnOnce(&Manifest, &Asset) -> Result<Vec<u8>, String>,
+    probe: impl Fn(&Path) -> Result<(), String>,
+) -> Result<String, String> {
     let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|_| "Invalid chat release manifest")?;
+        serde_json::from_slice(manifest_bytes).map_err(|_| "Invalid chat release manifest")?;
     let asset = manifest.asset(name)?;
+    if let Some(running) = running {
+        match compare_versions(running, &manifest.version) {
+            Some(std::cmp::Ordering::Equal) => {
+                return Ok(format!(
+                    "Chat {running} is up to date and running. No restart is needed."
+                ));
+            }
+            Some(std::cmp::Ordering::Greater) => {
+                return Ok(format!(
+                    "Chat {running} is running, newer than the published release {}. No downgrade was installed.",
+                    manifest.version
+                ));
+            }
+            _ => {}
+        }
+    }
     let folder = root.join(&manifest.version);
     let path = folder.join(name);
     if path.is_file()
@@ -243,17 +298,13 @@ fn install() -> Result<String, String> {
         && verify(&installed_bytes, asset).is_ok()
     {
         probe(&path)?;
-        activate(&root, &manifest_bytes)?;
+        activate(root, manifest_bytes)?;
         return Ok(format!(
             "Chat {} is installed. Close and reopen the editor to use it.",
             manifest.version
         ));
     }
-    let binary = fetch(
-        &agent,
-        &format!("{REPOSITORY}/download/v{}/{name}", manifest.version),
-        asset.size,
-    )?;
+    let binary = download(&manifest, asset)?;
     verify(&binary, asset)?;
     std::fs::create_dir_all(&folder).map_err(|_| "Cannot create the chat component folder")?;
     // A separate candidate is verified and probed before any activation pointer is touched.
@@ -272,7 +323,7 @@ fn install() -> Result<String, String> {
     }
     std::fs::rename(&candidate, &path)
         .map_err(|_| "Cannot finish installing the chat component")?;
-    activate(&root, &manifest_bytes)?;
+    activate(root, manifest_bytes)?;
     Ok(format!(
         "Chat {} installed. Restart the editor when convenient; the current conversation is untouched.",
         manifest.version
@@ -319,6 +370,11 @@ impl Updater {
         &self.message
     }
     pub fn check(&mut self, wake: Wake) {
+        self.check_running(None, wake);
+    }
+    /// `running` comes from the connected component's completed compatibility handshake,
+    /// not an activation pointer: a cached update may not be the process in use yet.
+    pub fn check_running(&mut self, running: Option<String>, wake: Wake) {
         if self.receive.is_some() {
             return;
         }
@@ -327,9 +383,10 @@ impl Updater {
         match std::thread::Builder::new()
             .name("chat-component-update".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(install).unwrap_or_else(|_| {
-                    Err("Chat update worker stopped; the installed version was kept".into())
-                });
+                let result = std::panic::catch_unwind(|| install(running.as_deref()))
+                    .unwrap_or_else(|_| {
+                        Err("Chat update worker stopped; the installed version was kept".into())
+                    });
                 let _ = send.send(result);
                 wake();
             }) {
@@ -358,6 +415,106 @@ mod tests {
             }],
         })
         .unwrap()
+    }
+    #[test]
+    fn checking_the_running_release_repeatedly_never_installs_or_requests_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = platform().unwrap_or("unsupported");
+        if platform().is_none() {
+            return;
+        }
+        let manifest = activation_manifest("0.6.2");
+        let previous = activation_manifest("0.6.1");
+        activate(dir.path(), &previous).unwrap();
+        activate(dir.path(), &manifest).unwrap();
+        for _ in 0..3 {
+            let message = install_manifest(
+                dir.path(),
+                name,
+                &manifest,
+                Some("0.6.2"),
+                |_, _| panic!("already running: must not download"),
+                |_| panic!("already running: must not launch another process"),
+            )
+            .unwrap();
+            assert_eq!(
+                message,
+                "Chat 0.6.2 is up to date and running. No restart is needed."
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("current.json")).unwrap(),
+                manifest
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("previous.json")).unwrap(),
+                previous
+            );
+        }
+    }
+
+    #[test]
+    fn an_installed_update_stops_requesting_restart_after_its_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(name) = platform() else { return };
+        let previous = activation_manifest("0.6.1");
+        let manifest = activation_manifest("0.6.2");
+        activate(dir.path(), &previous).unwrap();
+        std::fs::create_dir_all(dir.path().join("0.6.2")).unwrap();
+        std::fs::write(dir.path().join("0.6.2").join(name), b"abc").unwrap();
+        let pending = install_manifest(
+            dir.path(),
+            name,
+            &manifest,
+            Some("0.6.1"),
+            |_, _| panic!("verified binary already installed"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(pending.contains("Close and reopen"));
+        let active = install_manifest(
+            dir.path(),
+            name,
+            &manifest,
+            Some("0.6.2"),
+            |_, _| panic!("must not redownload"),
+            |_| panic!("must not reprobe"),
+        )
+        .unwrap();
+        assert!(active.contains("No restart is needed"));
+        assert_eq!(
+            std::fs::read(dir.path().join("previous.json")).unwrap(),
+            previous
+        );
+    }
+
+    #[test]
+    fn a_newer_running_component_is_not_downgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(name) = platform() else { return };
+        let message = install_manifest(
+            dir.path(),
+            name,
+            &activation_manifest("0.6.2"),
+            Some("0.7.0"),
+            |_, _| panic!("must not downgrade"),
+            |_| panic!("must not probe an older binary"),
+        )
+        .unwrap();
+        assert!(message.contains("No downgrade was installed"));
+        assert!(!dir.path().join("current.json").exists());
+        assert_eq!(
+            compare_versions("0.6.10", "0.6.2"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_versions("0.06.2", "0.6.2"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            compare_versions("1.9999999999999999999999999999.0", "1.2.0"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(compare_versions("../0.6.2", "0.6.2"), None);
     }
     #[test]
     fn activation_keeps_the_previous_version_and_repeated_checks_do_not_replace_it() {

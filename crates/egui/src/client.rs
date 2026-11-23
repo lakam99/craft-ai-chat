@@ -295,7 +295,12 @@ impl<T> Panel<T> {
             return Some(host.open_preferences().map(|()| Value::Null));
         }
         if id == "ai.update" {
-            self.updater.check(ctx_wake(ctx));
+            let running = self
+                .connection
+                .as_ref()
+                .filter(|c| c.ready)
+                .map(|c| c.version.clone());
+            self.updater.check_running(running, ctx_wake(ctx));
             return Some(Ok(json!({"pending":true})));
         }
         if matches!(
@@ -665,8 +670,14 @@ impl<T> Panel<T> {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    let response = ui.small_button("Update chat component");
-                    host.widget("ai.update", &response, "Update chat component");
+                    if let Some(connection) = self.connection.as_ref().filter(|c| c.ready) {
+                        ui.small(format!("Chat {}", connection.version));
+                    }
+                    let response = ui.add_enabled(
+                        !self.updater.busy() && self.connection.as_ref().is_none_or(|c| c.ready),
+                        egui::Button::new("Check for chat updates").small(),
+                    );
+                    host.widget("ai.update", &response, "Check for chat updates");
                     if response.clicked() {
                         let _ = self.command(host, ui.ctx(), "ai.update");
                     }
