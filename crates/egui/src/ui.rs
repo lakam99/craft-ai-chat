@@ -89,7 +89,7 @@ impl<T> Panel<T> {
             ui.label(&self.vault.message);
         }
         if self.preferences.remember_history {
-            ui.small("Chat history is saved locally per project. New chat clears the current saved conversation.");
+            ui.small("Chats are saved locally per project. History reopens earlier chats; New chat keeps the previous conversation.");
         }
         if !self.archive.message.is_empty() {
             ui.label(&self.archive.message);
@@ -118,8 +118,7 @@ impl<T> Panel<T> {
         let busy = self.busy();
         let mut action = None;
         let prompt_id = egui::Id::unique("ai.prompt.field");
-        let enter = !busy
-            && ctx.memory(|m| m.has_focus(prompt_id))
+        let enter = ctx.memory(|m| m.has_focus(prompt_id))
             && ui.input_mut(|i| {
                 // consume_key permits extra modifiers; preserve Shift+Enter for multiline input.
                 i.modifiers == egui::Modifiers::NONE
@@ -141,7 +140,7 @@ impl<T> Panel<T> {
                         .max_height(104.0)
                         .show(ui, |ui| {
                             let response = ui.add_enabled(
-                                !busy,
+                                !self.vault.busy(),
                                 egui::TextEdit::multiline(&mut self.prompt)
                                     .id(prompt_id)
                                     .frame(egui::Frame::NONE)
@@ -191,10 +190,12 @@ impl<T> Panel<T> {
                             } else {
                                 "Working in the editor…"
                             });
-                        } else {
+                        }
+                        {
                             let response = ui.add_enabled(
                                 !self.vault.busy() && !self.prompt.trim().is_empty(),
-                                egui::Button::new("Send").fill(ui.visuals().selection.bg_fill),
+                                egui::Button::new(if busy { "Send correction" } else { "Send" })
+                                    .fill(ui.visuals().selection.bg_fill),
                             );
                             register(host, "ai.send", &response, "Send AI message");
                             if response.clicked() || enter {
@@ -211,6 +212,9 @@ impl<T> Panel<T> {
                 let response = ui.add_enabled(!busy, egui::Button::new("New chat").small());
                 register(host, "ai.clear", &response, "New chat");
                 if response.clicked() { action = Some("ai.clear"); }
+                let response=ui.add_enabled(!busy,egui::Button::new("History").small());
+                register(host,"ai.history",&response,"Saved chats");
+                if response.clicked(){action=Some("ai.history");}
                 let response = ui.small_button("Preferences…");
                 register(host, "ai.settings", &response, "AI Chat preferences");
                 if response.clicked() { action = Some("ai.settings"); }
@@ -231,6 +235,42 @@ impl<T> Panel<T> {
                     register(host, "ai.connection.close", &response, "Close connection settings");
                     if response.clicked() { self.connection_open = false; }
                 });
+            }
+            let mut mode=self.goal_mode;
+            let response=ui.add_enabled(!busy,egui::Checkbox::new(&mut mode,"Pursue a goal"));
+            register(host,"ai.goal",&response,"Pursue a goal");
+            if response.changed(){action=Some("ai.goal");}
+            if let Some(goal)=&self.goal {
+                let session=goals::lock(goal);
+                ui.strong(format!("Goal · {:?}",session.goal.phase));
+                ui.label(session.goal.instructions.join("\n\n").chars().take(180).collect::<String>());
+                ui.small(&session.goal.reason);
+                if session.goal.phase!=core::goal::Phase::Complete {
+                    let response=ui.add_enabled(!busy&&!session.goal.needs_review,egui::Button::new("Resume goal"));
+                    register(host,"ai.goal.resume",&response,"Resume saved goal");
+                    if response.clicked(){action=Some("ai.goal.resume");}
+                    if session.goal.needs_review {
+                        let response=ui.add_enabled(!busy,egui::Button::new("I reviewed the uncertain edit"));
+                        register(host,"ai.goal.review",&response,"Acknowledge uncertain edit");
+                        if response.clicked(){action=Some("ai.goal.review");}
+                    }
+                }
+            }else if self.goal_mode{ui.small("Describe your task and completion criteria. The assistant pauses when it needs you.");}
+            if self.archive.browsing {
+                ui.strong("Chats in this project");
+                let response=ui.add(egui::TextEdit::singleline(&mut self.archive.query).hint_text("Search saved chats").char_limit(128));
+                register(host,"ai.history.search",&response,"Search saved chats");
+                let mut selected=None;
+                egui::ScrollArea::vertical().id_salt("ai.history.list").max_height(180.0).show(ui,|ui|{
+                    if let Some(library)=&self.archive.library {
+                        for entry in library.entries().iter().rev().filter(|entry|entry.title.to_lowercase().contains(&self.archive.query.to_lowercase())){
+                            let response=ui.add_enabled(!busy&&entry.id!=library.active(),egui::Button::new(&entry.title));
+                            register(host,&format!("ai.history.open.{}",entry.id),&response,&entry.title);
+                            if response.clicked(){selected=Some(entry.id.clone());}
+                        }
+                    }else{ui.small("Enable local history in editor preferences to save and reopen chats.");}
+                });
+                if let Some(id)=selected && let Err(error)=self.switch_chat(host,&ctx,Some(&id)){self.message=error;}
             }
             ui.add_space(8.0);
             self.guidance_ui(host, ui);

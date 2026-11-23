@@ -11,6 +11,7 @@
 pub mod batch;
 pub mod bounds;
 pub mod editor;
+pub mod goal;
 pub mod history;
 pub mod protocol;
 pub mod runtime;

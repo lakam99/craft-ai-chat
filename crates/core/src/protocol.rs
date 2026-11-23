@@ -19,6 +19,50 @@ pub struct Completed {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentEnd {
+    Reply,
+    ToolBudget,
+    NoProgress,
+}
+pub enum Disposition {
+    Execute,
+    Reuse(Value),
+}
+
+/// Persistence errors stop the loop before another editor action. The ordinary
+/// conversation adapter uses only checkpoint; continuous goals also journal actions.
+pub trait Observer {
+    fn checkpoint(&mut self, history: &[Value]) -> Result<(), String>;
+    fn before_tool(&mut self, _id: &str, _call: &crate::ToolCall) -> Result<Disposition, String> {
+        Ok(Disposition::Execute)
+    }
+    fn after_tool(
+        &mut self,
+        _id: &str,
+        _call: &crate::ToolCall,
+        _result: &Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn recover_history(&mut self, _history: &mut Vec<Value>, _error: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn finished(&mut self, _reason: SegmentEnd) -> Result<(), String> {
+        Ok(())
+    }
+    fn terminal(&self) -> Option<String> {
+        None
+    }
+}
+
+struct HistoryObserver<F>(F);
+impl<F: FnMut(&[Value]) -> Result<(), String>> Observer for HistoryObserver<F> {
+    fn checkpoint(&mut self, history: &[Value]) -> Result<(), String> {
+        (self.0)(history)
+    }
+}
+
 /// The injected transport keeps protocol tests offline; production always uses the fixed HTTPS endpoint.
 pub fn run(
     info: &crate::HostInfo,
@@ -38,9 +82,29 @@ pub fn run_with_history(
     model: &str,
     history: &mut Vec<Value>,
     cancel: &AtomicBool,
+    request: impl FnMut(&Value) -> Result<Value, String>,
+    tool: impl FnMut(&str, &Value) -> Result<Value, String>,
+    checkpoint: impl FnMut(&[Value]) -> Result<(), String>,
+) -> Result<String, String> {
+    run_observed(
+        info,
+        model,
+        history,
+        cancel,
+        request,
+        tool,
+        &mut HistoryObserver(checkpoint),
+    )
+}
+
+pub fn run_observed(
+    info: &crate::HostInfo,
+    model: &str,
+    history: &mut Vec<Value>,
+    cancel: &AtomicBool,
     mut request: impl FnMut(&Value) -> Result<Value, String>,
     mut tool: impl FnMut(&str, &Value) -> Result<Value, String>,
-    mut checkpoint: impl FnMut(&[Value]) -> Result<(), String>,
+    observer: &mut impl Observer,
 ) -> Result<String, String> {
     let info = if info
         .tools
@@ -68,7 +132,13 @@ pub fn run_with_history(
     }
     for _ in 0..=MAX_CALLS {
         check_cancel(cancel)?;
-        crate::history::compact_if_needed(history, model, cancel, &mut request)?;
+        if let Err(error) = crate::history::compact_if_needed(history, model, cancel, &mut request)
+        {
+            check_cancel(cancel)?;
+            if !observer.recover_history(history, &error)? {
+                return Err(error);
+            }
+        }
         if history.len() > 256
             || crate::bounds::serialized_size(&history, MAX_BODY)? > MAX_BODY - 64 * 1024
         {
@@ -141,6 +211,7 @@ pub fn run_with_history(
                         .and_then(Value::as_str)
                         .filter(|s| s.len() <= 64 * 1024)
                         .ok_or("Invalid tool arguments")?;
+                    let mut observed = None;
                     let result = match serde_json::from_str::<Value>(args) {
                         Ok(args) => {
                             let call = crate::ToolCall::new(name, args);
@@ -158,13 +229,34 @@ pub fn run_with_history(
                                     crate::tool_results::read(&call, history)
                                 } else { match crate::editor::discovery::reuse(&call, history)? {
                                     Some(result) => Ok(result),
-                                    None => tool(&call.name, &call.arguments),
+                                    None => {
+                                        // The storage barrier must not be converted into a recoverable
+                                        // tool error: no editor side effect is authorized until it succeeds.
+                                        observed = Some(call.clone());
+                                        Ok(Value::Null)
+                                    },
                                 }})
                                 .and_then(|result| {
                                     crate::editor::discovery::compact(&call, result)
                                 })
                         }
                         Err(_) => Err("Tool arguments must be a JSON object".into()),
+                    };
+                    let result = if let Some(call) = &observed {
+                        match observer.before_tool(id, call)? {
+                            Disposition::Reuse(value) => Ok(value),
+                            Disposition::Execute => {
+                                let value =
+                                    tool(&call.name, &call.arguments).unwrap_or_else(|error| {
+                                        Value::String(json!({"ok":false,"error":error}).to_string())
+                                    });
+                                crate::bounds::value_size(&value, MAX_REPLY)?;
+                                observer.after_tool(id, call, &value)?;
+                                crate::editor::discovery::compact(call, value)
+                            }
+                        }
+                    } else {
+                        result
                     };
                     let result = result.unwrap_or_else(|error| {
                         Value::String(json!({"ok":false,"error":error}).to_string())
@@ -190,7 +282,14 @@ pub fn run_with_history(
                     history
                         .push(json!({"type":"function_call_output","call_id":id,"output":result}));
                     crate::tool_results::prepare_history(history)?;
-                    checkpoint(history)?;
+                    observer.checkpoint(history)?;
+                    if let Some(message) = observer.terminal() {
+                        crate::history::close_pending(
+                            history,
+                            "Goal stopped at a safe tool boundary",
+                        );
+                        return Ok(message);
+                    }
                     crate::bounds::serialized_size(&history, MAX_BODY)?;
                 }
                 Some("message") => {
@@ -214,6 +313,13 @@ pub fn run_with_history(
             if text.is_empty() {
                 return Err("OpenAI returned no chat message".into());
             }
+            observer.finished(if progress.finish() {
+                SegmentEnd::NoProgress
+            } else if calls == MAX_CALLS {
+                SegmentEnd::ToolBudget
+            } else {
+                SegmentEnd::Reply
+            })?;
             return Ok(text);
         }
     }

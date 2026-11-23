@@ -151,11 +151,13 @@ impl Panel<u64> {
                 Style::Warning,
             ));
         }
+        let mut auxiliary = Vec::new();
         let mut top = vec![
             Node::Row {
                 children: vec![
                     text("ai.title", "Assistant", Style::Heading),
                     button("ai.clear", "New chat", idle),
+                    button("ai.history", "History", idle),
                     button("ai.settings", "Preferences…", true),
                 ],
             },
@@ -170,6 +172,108 @@ impl Panel<u64> {
                 true,
             ),
         ];
+        if host
+            .snapshot
+            .capabilities
+            .iter()
+            .any(|c| c == runtime::COMPONENT_ACTIONS)
+        {
+            top.push(Node::Toggle {
+                id: "ai.goal".into(),
+                label: "Pursue a goal".into(),
+                value: self.goal_mode,
+                enabled: idle,
+            });
+            if let Some(goal) = &self.goal {
+                let session = crate::goals::lock(goal);
+                let mut children = vec![
+                    text(
+                        "ai.goal.phase",
+                        format!("Goal · {:?}", session.goal.phase),
+                        Style::Heading,
+                    ),
+                    text(
+                        "ai.goal.criteria",
+                        session
+                            .goal
+                            .instructions
+                            .join("\n\n")
+                            .chars()
+                            .take(300)
+                            .collect::<String>(),
+                        Style::Body,
+                    ),
+                    text("ai.goal.reason", &session.goal.reason, Style::Muted),
+                ];
+                if session.goal.phase != crate::core::goal::Phase::Complete {
+                    children.push(button(
+                        "ai.goal.resume",
+                        "Resume goal",
+                        idle && !session.goal.needs_review,
+                    ));
+                    if session.goal.needs_review {
+                        children.push(button(
+                            "ai.goal.review",
+                            "I reviewed the uncertain edit",
+                            idle,
+                        ));
+                    }
+                }
+                top.push(Node::Card {
+                    id: "ai.goal.card".into(),
+                    accent: true,
+                    children,
+                });
+            } else if self.goal_mode {
+                top.push(text("ai.goal.help","Describe the task and what must be true when it is finished. The assistant pauses when it needs you. Pause stops after the current edit.",Style::Muted));
+            }
+            if self.archive.browsing {
+                let mut children = vec![text(
+                    "ai.history.title",
+                    "Chats in this project",
+                    Style::Heading,
+                )];
+                children.push(Node::Input {
+                    id: "ai.history.search".into(),
+                    label: "Search saved chats".into(),
+                    value: self.archive.query.clone(),
+                    password: false,
+                    multiline: false,
+                    enabled: idle,
+                });
+                if let Some(library) = &self.archive.library {
+                    for entry in library
+                        .entries()
+                        .iter()
+                        .rev()
+                        .filter(|entry| {
+                            entry
+                                .title
+                                .to_lowercase()
+                                .contains(&self.archive.query.to_lowercase())
+                        })
+                        .take(100)
+                    {
+                        children.push(button(
+                            &format!("ai.history.open.{}", entry.id),
+                            &entry.title,
+                            idle && entry.id != library.active(),
+                        ));
+                    }
+                } else {
+                    children.push(text(
+                        "ai.history.help",
+                        "Enable local chat history in editor preferences to save and reopen chats.",
+                        Style::Muted,
+                    ));
+                }
+                auxiliary.push(Node::Card {
+                    id: "ai.history.browser".into(),
+                    accent: false,
+                    children,
+                });
+            }
+        }
         if self.connection_open {
             let mut connection = settings.clone();
             if host
@@ -191,7 +295,17 @@ impl Panel<u64> {
             });
         }
         top.push(Node::Separator);
-        let mut body = Vec::new();
+        if !self.busy() && !self.queued.is_empty() {
+            top.push(text(
+                "ai.queued",
+                format!(
+                    "{} saved corrections waiting. Send a message or Resume to continue.",
+                    self.queued.len()
+                ),
+                Style::Warning,
+            ));
+        }
+        let mut body = auxiliary;
         if self.chat.entries.is_empty() {
             body.push(text(
                 "ai.welcome.title",
@@ -205,7 +319,7 @@ impl Panel<u64> {
                 Style::Muted,
             ));
         }
-        for entry in &self.chat.entries {
+        for entry in self.chat.entries.iter().filter(|_| !self.archive.browsing) {
             let (accent, children) = match &entry.content {
                 Content::Message {
                     role,
@@ -272,7 +386,7 @@ impl Panel<u64> {
                 value: self.prompt.clone(),
                 password: false,
                 multiline: true,
-                enabled: idle,
+                enabled: !self.vault.busy(),
             },
             Node::Toggle {
                 id: "ai.attach".into(),
@@ -282,15 +396,12 @@ impl Panel<u64> {
             },
             Node::Row {
                 children: vec![
-                    if idle {
-                        button(
-                            "ai.send",
-                            "Send",
-                            unlocked && !self.prompt.trim().is_empty(),
-                        )
-                    } else {
-                        button("ai.stop", "Stop", true)
-                    },
+                    button(
+                        "ai.send",
+                        if idle { "Send" } else { "Send correction" },
+                        !self.vault.busy() && !self.prompt.trim().is_empty(),
+                    ),
+                    button("ai.stop", "Pause", !idle),
                     text(
                         "ai.keyboard",
                         "Enter to send · Shift+Enter for a new line",
@@ -326,6 +437,14 @@ impl Panel<u64> {
                     .into();
                 Ok(())
             }
+            "ai.history.search" => {
+                self.archive.query = value
+                    .as_str()
+                    .filter(|s| s.len() <= 128)
+                    .ok_or("Invalid history search")?
+                    .into();
+                Ok(())
+            }
             "ai.key" => {
                 self.key = value
                     .as_str()
@@ -346,6 +465,16 @@ impl Panel<u64> {
                 "ai.attachFrames",
                 json!(value.as_bool().ok_or("Invalid attachment preference")?),
             ),
+            "ai.goal" => {
+                let enabled = value.as_bool().ok_or("Invalid goal toggle")?;
+                if enabled != self.goal_mode {
+                    self.command(host, ctx, id)
+                        .ok_or("Unknown goal action")?
+                        .map(|_| ())
+                } else {
+                    Ok(())
+                }
+            }
             _ => self
                 .command(host, ctx, id)
                 .ok_or("Unknown chat action")?
